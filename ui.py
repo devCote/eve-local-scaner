@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -8,8 +8,9 @@ from PySide6.QtWidgets import (
 
 from parser import parse_pilots
 from clipboard import ClipboardWatcher
-from esi_client import get_character_id
-from zkill_client import get_danger_percent, get_gangRatio
+from esi_client import get_character_id, get_ally_or_corp
+from zkill_client import get_danger_percent, get_gangRatio, has_cyno_history
+from worker import PilotWorker
 
 
 class EveLocalScanner(QWidget):
@@ -17,10 +18,13 @@ class EveLocalScanner(QWidget):
         super().__init__()
 
         self.setWindowTitle("EVE Local Intel Scanner")
-        self.resize(650, 650)
+        self.resize(700, 650)
 
         self.build_ui()
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(8)
         self.clipboard_watcher = ClipboardWatcher(self.on_clipboard_text)
+
 
     def build_ui(self):
         layout = QVBoxLayout()
@@ -60,16 +64,17 @@ class EveLocalScanner(QWidget):
         layout.addLayout(controls)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(
-            ["Pilot", "Danger", "Gang", "Cyno", "Notes"]
+            ["C", "Pilot", "Danger", "Gang", "Ally/Corp", "Notes"]
         )
 
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
 
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -97,54 +102,91 @@ class EveLocalScanner(QWidget):
 
     def get_row_color(self, danger: int):
         if danger >= 60:
-            return "#552222"  # red background
+            return "#552222"
         if danger >= 40:
-            return "#555022"  # yellow background
-        return "#225533"      # green background
+            return "#555022"
+        return "#225533"
 
-    def get_cyno_status(self, danger: int, gang: int):
-        if danger >= 60 and gang >= 70:
-            return "HIGH"
-        if danger >= 40 and gang >= 50:
-            return "MED"
-        return "-"
+    def set_loading_row(self, row, pilot):
+        cyno_item = QTableWidgetItem("")
+        pilot_item = QTableWidgetItem(pilot)
+        danger_item = QTableWidgetItem("...")
+        gang_item = QTableWidgetItem("...")
+        ally_item = QTableWidgetItem("loading")
+        notes_item = QTableWidgetItem("loading...")
+
+        cyno_item.setTextAlignment(Qt.AlignCenter)
+        danger_item.setTextAlignment(Qt.AlignCenter)
+        gang_item.setTextAlignment(Qt.AlignCenter)
+        ally_item.setTextAlignment(Qt.AlignCenter)
+
+        bg_color = QColor("#1A1D21")
+
+        for item in [
+            cyno_item,
+            pilot_item,
+            danger_item,
+            gang_item,
+            ally_item,
+            notes_item,
+        ]:
+            item.setBackground(bg_color)
+
+        self.table.setItem(row, 0, cyno_item)
+        self.table.setItem(row, 1, pilot_item)
+        self.table.setItem(row, 2, danger_item)
+        self.table.setItem(row, 3, gang_item)
+        self.table.setItem(row, 4, ally_item)
+        self.table.setItem(row, 5, notes_item)
 
     def update_table(self, pilots):
         self.table.setRowCount(len(pilots))
+        self.status_label.setText(f"Status: loading pilots: {len(pilots)}")
 
         for row, pilot in enumerate(pilots):
-            character_id = get_character_id(pilot)
+            self.set_loading_row(row, pilot)
 
-            if character_id:
-                danger = get_danger_percent(character_id)
-                gang = get_gangRatio(character_id)
-                cyno = self.get_cyno_status(danger, gang)
-                notes = f"https://zkillboard.com/character/{character_id}/"
-            else:
-                danger = 0
-                gang = 0
-                cyno = "-"
-                notes = "pilot not found"
+            worker = PilotWorker(row, pilot)
+            worker.signals.finished.connect(self.update_pilot_row)
+            self.thread_pool.start(worker)
 
-            pilot_item = QTableWidgetItem(pilot)
-            danger_item = QTableWidgetItem(str(danger))
-            gang_item = QTableWidgetItem(str(gang))
-            cyno_item = QTableWidgetItem(cyno)
-            notes_item = QTableWidgetItem(notes)
+    def update_pilot_row(self, row, result):
+        danger = result.get("danger", 0)
+        gang = result.get("gang", 0)
+        ally = result.get("ally", "?")
+        cyno_icon = "✴︎" if result.get("cyno") else ""
+        notes = result.get("url", "pilot not found")
+        pilot = result.get("pilot", "")
 
-            danger_item.setTextAlignment(Qt.AlignCenter)
-            gang_item.setTextAlignment(Qt.AlignCenter)
-            cyno_item.setTextAlignment(Qt.AlignCenter)
+        cyno_item = QTableWidgetItem(cyno_icon)
+        pilot_item = QTableWidgetItem(pilot)
+        danger_item = QTableWidgetItem(str(danger))
+        gang_item = QTableWidgetItem(str(gang))
+        ally_item = QTableWidgetItem(ally)
+        notes_item = QTableWidgetItem(notes)
 
-            bg_color = self.get_row_color(danger)
+        cyno_item.setTextAlignment(Qt.AlignCenter)
+        danger_item.setTextAlignment(Qt.AlignCenter)
+        gang_item.setTextAlignment(Qt.AlignCenter)
+        ally_item.setTextAlignment(Qt.AlignCenter)
 
-            for item in [pilot_item, danger_item, gang_item, cyno_item, notes_item]:
-                item.setBackground(QColor(bg_color))
+        bg_color = QColor(self.get_row_color(danger))
 
-            self.table.setItem(row, 0, pilot_item)
-            self.table.setItem(row, 1, danger_item)
-            self.table.setItem(row, 2, gang_item)
-            self.table.setItem(row, 3, cyno_item)
-            self.table.setItem(row, 4, notes_item)
+        for item in [
+            cyno_item,
+            pilot_item,
+            danger_item,
+            gang_item,
+            ally_item,
+            notes_item,
+        ]:
+            item.setBackground(bg_color)
 
-        self.status_label.setText(f"Status: pilots found: {len(pilots)}")
+        self.table.setItem(row, 0, cyno_item)
+        self.table.setItem(row, 1, pilot_item)
+        self.table.setItem(row, 2, danger_item)
+        self.table.setItem(row, 3, gang_item)
+        self.table.setItem(row, 4, ally_item)
+        self.table.setItem(row, 5, notes_item)
+
+        self.status_label.setText("Status: updated")
