@@ -175,7 +175,7 @@ def is_recent_killmail(loss, days: int = 28) -> bool:
 
 
 def has_cyno_history(character_id: int, limit: int = 50, days: int = 28) -> bool:
-    cache_key = f"zkill:cyno:{character_id}:{limit}:{days}"
+    cache_key = f"zkill:cyno:{character_id}:{limit}"
 
     cached = cache.get(cache_key, ttl_seconds=TTL_CYNO)
 
@@ -184,20 +184,19 @@ def has_cyno_history(character_id: int, limit: int = 50, days: int = 28) -> bool
 
     losses = get_recent_losses(character_id, limit=limit)
 
-    recent_losses = [
-        loss for loss in losses
-        if is_recent_killmail(loss, days=days)
-    ]
+    # zKill losses не содержит killmail_time, поэтому НЕ фильтруем по времени тут
+    losses_to_check = losses[:15]
 
-    # защита от 50 ESI запросов
-    recent_losses = recent_losses[:15]
+    checked = 0
 
-    for loss in recent_losses:
+    for loss in losses_to_check:
         killmail_id = loss.get("killmail_id")
         killmail_hash = loss.get("zkb", {}).get("hash")
 
         if not killmail_id or not killmail_hash:
             continue
+
+        checked += 1
 
         full_killmail = get_full_killmail(killmail_id, killmail_hash)
 
@@ -205,8 +204,10 @@ def has_cyno_history(character_id: int, limit: int = 50, days: int = 28) -> bool
             continue
 
         if has_cyno_fit(full_killmail):
+            print(f"Cyno found for {character_id} after {checked} killmails")
             cache.set(cache_key, True)
             return True
 
+    print(f"No cyno found for {character_id}, checked {checked} killmails")
     cache.set(cache_key, False)
     return False
