@@ -1,16 +1,20 @@
-from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QTableWidget, QTableWidgetItem, QHeaderView,
-    QCheckBox, QPushButton
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QCheckBox,
+    QPushButton,
 )
 
 from parser import parse_pilots
-from clipboard import ClipboardWatcher
-from esi_client import get_character_id, get_ally_or_corp
-from zkill_client import get_danger_percent, get_gangRatio, has_cyno_history
 from worker import PilotWorker
+import pyperclip
 
 
 class EveLocalScanner(QWidget):
@@ -20,11 +24,14 @@ class EveLocalScanner(QWidget):
         self.setWindowTitle("EVE Local Intel Scanner")
         self.resize(700, 650)
 
-        self.build_ui()
+        self.last_clipboard_text = ""
+        self.last_pilots = []
+
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(8)
-        self.clipboard_watcher = ClipboardWatcher(self.on_clipboard_text)
 
+        self.build_ui()
+        self.start_clipboard_timer()
 
     def build_ui(self):
         layout = QVBoxLayout()
@@ -48,7 +55,7 @@ class EveLocalScanner(QWidget):
         """)
         layout.addWidget(title)
 
-        self.status_label = QLabel("Status: watching clipboard")
+        self.status_label = QLabel("Status: watching clipboard in background")
         layout.addWidget(self.status_label)
 
         controls = QHBoxLayout()
@@ -69,11 +76,19 @@ class EveLocalScanner(QWidget):
             ["C", "Pilot", "Danger", "Gang", "Ally/Corp", "Notes"]
         )
 
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeToContents
+        )
         self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
 
         self.table.verticalHeader().setVisible(False)
@@ -88,16 +103,157 @@ class EveLocalScanner(QWidget):
 
         self.setLayout(layout)
 
+
+class EveLocalScanner(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("EVE Local Intel Scanner")
+        self.resize(700, 650)
+
+        self.last_clipboard_text = ""
+        self.last_pilots = []
+
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(8)
+
+        self.build_ui()
+        self.start_clipboard_timer()
+
+    def build_ui(self):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        top_bar = QLabel()
+        top_bar.setFixedHeight(3)
+        top_bar.setStyleSheet("background-color: #FF9900;")
+        layout.addWidget(top_bar)
+
+        title = QLabel("EVE LOCAL INTEL")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("""
+            QLabel {
+                color: #FF9900;
+                font-size: 16pt;
+                font-weight: bold;
+                letter-spacing: 2px;
+            }
+        """)
+        layout.addWidget(title)
+
+        self.status_label = QLabel("Status: watching clipboard in background")
+        layout.addWidget(self.status_label)
+
+        controls = QHBoxLayout()
+
+        self.always_on_top = QCheckBox("Always on top")
+        self.always_on_top.stateChanged.connect(self.toggle_always_on_top)
+        controls.addWidget(self.always_on_top)
+
+        self.scan_button = QPushButton("Scan Clipboard")
+        self.scan_button.clicked.connect(self.scan_clipboard)
+        controls.addWidget(self.scan_button)
+
+        layout.addLayout(controls)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(
+            ["C", "Pilot", "Danger", "Gang", "Ally/Corp", "Notes"]
+        )
+
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            4, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        layout.addWidget(self.table)
+
+        self.footer_label = QLabel("Copy local from EVE: Ctrl+A → Ctrl+C")
+        self.footer_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.footer_label)
+
+        self.setLayout(layout)
+
+    def start_clipboard_timer(self):
+        self.clipboard_timer = QTimer(self)
+        self.clipboard_timer.timeout.connect(self.check_clipboard_background)
+        self.clipboard_timer.start(700)
+
+    def read_clipboard_text(self):
+        try:
+            return pyperclip.paste().strip()
+        except Exception as e:
+            self.status_label.setText(f"Status: clipboard error: {e}")
+            return ""
+
+    def check_clipboard_background(self):
+        text = self.read_clipboard_text()
+
+        if not text:
+            return
+
+        if text == self.last_clipboard_text:
+            return
+
+        pilots = parse_pilots(text)
+
+        if not pilots:
+            self.last_clipboard_text = text
+            return
+
+        if pilots == self.last_pilots:
+            self.last_clipboard_text = text
+            return
+
+        self.last_clipboard_text = text
+        self.last_pilots = pilots
+
+        self.update_table(pilots)
+
     def toggle_always_on_top(self):
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, self.always_on_top.isChecked())
+        checked = self.always_on_top.isChecked()
+
+        if checked:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+            self.status_label.setText("Status: always on top enabled")
+        else:
+            self.setWindowFlags(self.windowFlags() & ~Qt.WindowStaysOnTopHint)
+            self.status_label.setText("Status: always on top disabled")
+
         self.show()
+        self.raise_()
 
     def scan_clipboard(self):
-        text = self.clipboard_watcher.clipboard.text().strip()
-        self.on_clipboard_text(text)
+        text = self.read_clipboard_text()
 
-    def on_clipboard_text(self, text):
+        if not text:
+            self.status_label.setText("Status: clipboard is empty")
+            return
+
         pilots = parse_pilots(text)
+
+        if not pilots:
+            self.status_label.setText("Status: no pilots found in clipboard")
+            return
+
+        self.last_clipboard_text = text
+        self.last_pilots = pilots
         self.update_table(pilots)
 
     def get_row_color(self, danger: int):
@@ -108,36 +264,25 @@ class EveLocalScanner(QWidget):
         return "#225533"
 
     def set_loading_row(self, row, pilot):
-        cyno_item = QTableWidgetItem("")
-        pilot_item = QTableWidgetItem(pilot)
-        danger_item = QTableWidgetItem("...")
-        gang_item = QTableWidgetItem("...")
-        ally_item = QTableWidgetItem("loading")
-        notes_item = QTableWidgetItem("loading...")
+        items = [
+            QTableWidgetItem(""),
+            QTableWidgetItem(pilot),
+            QTableWidgetItem("..."),
+            QTableWidgetItem("..."),
+            QTableWidgetItem("loading"),
+            QTableWidgetItem("loading..."),
+        ]
 
-        cyno_item.setTextAlignment(Qt.AlignCenter)
-        danger_item.setTextAlignment(Qt.AlignCenter)
-        gang_item.setTextAlignment(Qt.AlignCenter)
-        ally_item.setTextAlignment(Qt.AlignCenter)
+        for item in items:
+            item.setBackground(QColor("#1A1D21"))
 
-        bg_color = QColor("#1A1D21")
+        items[0].setTextAlignment(Qt.AlignCenter)
+        items[2].setTextAlignment(Qt.AlignCenter)
+        items[3].setTextAlignment(Qt.AlignCenter)
+        items[4].setTextAlignment(Qt.AlignCenter)
 
-        for item in [
-            cyno_item,
-            pilot_item,
-            danger_item,
-            gang_item,
-            ally_item,
-            notes_item,
-        ]:
-            item.setBackground(bg_color)
-
-        self.table.setItem(row, 0, cyno_item)
-        self.table.setItem(row, 1, pilot_item)
-        self.table.setItem(row, 2, danger_item)
-        self.table.setItem(row, 3, gang_item)
-        self.table.setItem(row, 4, ally_item)
-        self.table.setItem(row, 5, notes_item)
+        for col, item in enumerate(items):
+            self.table.setItem(row, col, item)
 
     def update_table(self, pilots):
         self.table.setRowCount(len(pilots))
@@ -158,35 +303,26 @@ class EveLocalScanner(QWidget):
         notes = result.get("url", "pilot not found")
         pilot = result.get("pilot", "")
 
-        cyno_item = QTableWidgetItem(cyno_icon)
-        pilot_item = QTableWidgetItem(pilot)
-        danger_item = QTableWidgetItem(str(danger))
-        gang_item = QTableWidgetItem(str(gang))
-        ally_item = QTableWidgetItem(ally)
-        notes_item = QTableWidgetItem(notes)
-
-        cyno_item.setTextAlignment(Qt.AlignCenter)
-        danger_item.setTextAlignment(Qt.AlignCenter)
-        gang_item.setTextAlignment(Qt.AlignCenter)
-        ally_item.setTextAlignment(Qt.AlignCenter)
+        items = [
+            QTableWidgetItem(cyno_icon),
+            QTableWidgetItem(pilot),
+            QTableWidgetItem(str(danger)),
+            QTableWidgetItem(str(gang)),
+            QTableWidgetItem(ally),
+            QTableWidgetItem(notes),
+        ]
 
         bg_color = QColor(self.get_row_color(danger))
 
-        for item in [
-            cyno_item,
-            pilot_item,
-            danger_item,
-            gang_item,
-            ally_item,
-            notes_item,
-        ]:
+        for item in items:
             item.setBackground(bg_color)
 
-        self.table.setItem(row, 0, cyno_item)
-        self.table.setItem(row, 1, pilot_item)
-        self.table.setItem(row, 2, danger_item)
-        self.table.setItem(row, 3, gang_item)
-        self.table.setItem(row, 4, ally_item)
-        self.table.setItem(row, 5, notes_item)
+        items[0].setTextAlignment(Qt.AlignCenter)
+        items[2].setTextAlignment(Qt.AlignCenter)
+        items[3].setTextAlignment(Qt.AlignCenter)
+        items[4].setTextAlignment(Qt.AlignCenter)
+
+        for col, item in enumerate(items):
+            self.table.setItem(row, col, item)
 
         self.status_label.setText("Status: updated")
