@@ -3,7 +3,7 @@ def apply_eve_style(app):
     QWidget {
         background-color: #101214;
         color: #D0D0D0;
-        font-family: Segoe UI;
+        font-family: "Segoe UI";
         font-size: 10pt;
     }
 
@@ -50,3 +50,4 @@ def apply_eve_style(app):
         font-weight: bold;
     }
     """)
+

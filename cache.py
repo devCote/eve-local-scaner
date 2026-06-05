@@ -50,10 +50,7 @@ class FileCache:
 
     def set(self, key: str, value):
         with self.lock:
-            self.data[key] = {
-                "created_at": time.time(),
-                "value": value
-            }
+            self.data[key] = {"created_at": time.time(), "value": value}
 
         self.save()
 
