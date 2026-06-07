@@ -1,8 +1,8 @@
+import sys
 import webbrowser
 import pyperclip
 
-from PySide6.QtCore import Qt, QThreadPool, QTimer, QEvent
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QSizeGrip,
@@ -11,125 +11,24 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QTableWidget,
-    QTableWidgetItem,
     QHeaderView,
-    QCheckBox,
-    QPushButton,
+    QAbstractItemView,
 )
 
 from parser import parse_pilots
-from worker import PilotWorker, CynoWorker
+from worker import PilotWorker
 from spinner import SpinnerManager
 from relations import RelationWorker
+from title_bar import TitleBar
+from intel_table import IntelTable
 
+from row_renderer import (
+    set_loading_row as render_loading_row,
+    render_pilot_row,
+    render_cyno_cell,
+)
 
-class TitleBar(QWidget):
-    def __init__(self, parent):
-        super().__init__(parent)
-
-        self.parent_window = parent
-
-        self.setObjectName("TitleBar")
-        self.setFixedHeight(32)
-
-        layout = QHBoxLayout()
-        layout.setContentsMargins(8, 0, 8, 0)
-        layout.setSpacing(6)
-
-        self.title = QLabel("EVE LOCAL INTEL SCANNER")
-        self.title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.title.setStyleSheet("""
-            QLabel {
-                color: #FF9900;
-                font-weight: bold;
-                letter-spacing: 2px;
-                background-color: transparent;
-            }
-        """)
-
-        self.minimize_button = QPushButton("—")
-        self.maximize_button = QPushButton("□")
-        self.close_button = QPushButton("×")
-
-        for button in [
-            self.minimize_button,
-            self.maximize_button,
-            self.close_button,
-        ]:
-            button.setFixedSize(28, 24)
-            button.setCursor(Qt.PointingHandCursor)
-            button.setStyleSheet("""
-                QPushButton {
-                    background-color: rgba(30, 34, 40, 180);
-                    color: #D0D0D0;
-                    border: 1px solid #3A4048;
-                    font-weight: bold;
-                }
-
-                QPushButton:hover {
-                    background-color: #FF9900;
-                    color: #000000;
-                }
-            """)
-
-        self.close_button.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(30, 34, 40, 180);
-                color: #D0D0D0;
-                border: 1px solid #3A4048;
-                font-weight: bold;
-            }
-
-            QPushButton:hover {
-                background-color: #AA2222;
-                color: #FFFFFF;
-            }
-        """)
-
-        self.minimize_button.clicked.connect(self.parent_window.showMinimized)
-        self.maximize_button.clicked.connect(self.toggle_maximize)
-        self.close_button.clicked.connect(self.parent_window.close)
-
-        layout.addWidget(self.title)
-        layout.addStretch()
-        layout.addWidget(self.minimize_button)
-        layout.addWidget(self.maximize_button)
-        layout.addWidget(self.close_button)
-
-        self.setLayout(layout)
-
-        self.setStyleSheet("""
-            QWidget#TitleBar {
-                background-color: rgba(10, 12, 14, 245);
-                border-bottom: 1px solid #FF9900;
-            }
-        """)
-
-    def toggle_maximize(self):
-        if self.parent_window.isMaximized():
-            self.parent_window.showNormal()
-        else:
-            self.parent_window.showMaximized()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            window = self.parent_window.windowHandle()
-
-            if window:
-                window.startSystemMove()
-
-            event.accept()
-
-    def mouseMoveEvent(self, event):
-        event.accept()
-
-    def mouseReleaseEvent(self, event):
-        event.accept()
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.toggle_maximize()
-            event.accept()
+from window_resize import handle_resize_event
 
 
 class EveLocalScanner(QWidget):
@@ -137,11 +36,11 @@ class EveLocalScanner(QWidget):
         super().__init__()
 
         self.setWindowTitle("EVE Local Scanner")
-        self.resize(900, 650)
+        self.resize(880, 520)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setMinimumSize(650, 400)
+        self.setMinimumSize(620, 320)
 
         self.resize_margin = 8
 
@@ -168,6 +67,8 @@ class EveLocalScanner(QWidget):
         self.last_relations_key = None
         self.active_relation_workers = []
 
+        self.last_hover_row = None
+
         self.build_ui()
 
         app = QApplication.instance()
@@ -193,8 +94,8 @@ class EveLocalScanner(QWidget):
         outer_layout.addWidget(self.main_panel)
 
         layout = QVBoxLayout(self.main_panel)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 8, 8, 6)
+        layout.setSpacing(4)
 
         self.title_bar = TitleBar(self)
         layout.addWidget(self.title_bar)
@@ -202,25 +103,27 @@ class EveLocalScanner(QWidget):
         self.status_label = QLabel("Status: ready")
         self.status_label.hide()
 
-        controls = QHBoxLayout()
-
-        self.always_on_top = QCheckBox("Always on top")
-        self.always_on_top.stateChanged.connect(self.toggle_always_on_top)
-        controls.addWidget(self.always_on_top)
-
-        controls.addStretch()
-
-        self.scan_button = QPushButton("Scan Clipboard")
-        self.scan_button.clicked.connect(self.scan_clipboard)
-        controls.addWidget(self.scan_button)
-
-        layout.addLayout(controls)
-
-        self.table = QTableWidget()
+        self.table = IntelTable()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
             ["D", "C", "Pilot", "Danger", "Gang", "Corp/Ally", "Top Ships"]
         )
+
+        self.table.setAlternatingRowColors(False)
+        self.table.verticalHeader().setVisible(False)
+
+        # Важно:
+        # отключаем системное выделение по клику.
+        # Теперь цвет строк меняется только через hover / linked pilots.
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setFocusPolicy(Qt.NoFocus)
+
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        self.table.rowHovered.connect(self.on_table_row_hovered)
+        self.table.mouseLeft.connect(self.on_table_mouse_left)
+        self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
 
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents
@@ -240,37 +143,15 @@ class EveLocalScanner(QWidget):
         )
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
 
-        self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-
-        self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
-
-        self.table.setMouseTracking(True)
-        self.table.viewport().setMouseTracking(True)
-        self.table.viewport().setAttribute(Qt.WA_Hover, True)
-        self.table.viewport().installEventFilter(self)
-
-        layout.addWidget(self.table)
-
-        self.footer_label = QLabel(
-            "Copy local from EVE: Ctrl+A → Ctrl+C | Cyno loads separately"
-        )
-        self.footer_label.setAlignment(Qt.AlignCenter)
-        self.footer_label.setStyleSheet("""
-            QLabel {
-                background-color: transparent;
-                color: #B0B0B0;
-            }
-        """)
-        layout.addWidget(self.footer_label)
+        layout.addWidget(self.table, 1)
 
         bottom_bar = QHBoxLayout()
         bottom_bar.setContentsMargins(0, 0, 0, 0)
+        bottom_bar.setSpacing(0)
         bottom_bar.addStretch()
 
         self.size_grip = QSizeGrip(self.main_panel)
-        self.size_grip.setFixedSize(18, 18)
+        self.size_grip.setFixedSize(14, 14)
         bottom_bar.addWidget(self.size_grip)
 
         layout.addLayout(bottom_bar)
@@ -317,107 +198,52 @@ class EveLocalScanner(QWidget):
 
         self.update_table(pilots)
 
-    def toggle_always_on_top(self):
-        checked = self.always_on_top.isChecked()
+    def force_windows_topmost(self, enabled: bool):
+        if sys.platform != "win32":
+            return
 
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_SHOWWINDOW = 0x0040
+
+            ctypes.windll.user32.SetWindowPos(
+                hwnd,
+                HWND_TOPMOST if enabled else HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            )
+
+        except Exception as e:
+            print("Topmost error:", e)
+
+    def toggle_always_on_top(self, checked):
         flags = Qt.Window | Qt.FramelessWindowHint
 
         if checked:
             flags |= Qt.WindowStaysOnTopHint
-            flags |= Qt.Tool
 
         self.setWindowFlags(flags)
         self.show()
         self.raise_()
         self.activateWindow()
-
-        if checked:
-            self.status_label.setText("Status: always on top enabled")
-        else:
-            self.status_label.setText("Status: always on top disabled")
-
-    def scan_clipboard(self):
-        text = self.read_clipboard_text()
-
-        if not text:
-            self.status_label.setText("Status: clipboard is empty")
-            return
-
-        pilots = parse_pilots(text)
-
-        if not pilots:
-            self.status_label.setText("Status: no pilots found in clipboard")
-            return
-
-        self.last_clipboard_text = text
-        self.last_pilots = pilots
-
-        self.update_table(pilots)
-
-    def get_row_color(self, danger: int):
-        return QColor(26, 29, 33, 220)
-
-    def get_danger_emoji(self, danger: int):
-        if danger < 40:
-            return "🐻"
-        if danger >= 80:
-            return "☠️"
-        if danger > 60:
-            return "💪🏼"
-        return ""
-
-    def set_emoji_cell(self, row, col, emoji):
-        self.table.setCellWidget(row, col, None)
-
-        if not emoji:
-            return
-
-        label = QLabel(emoji)
-        label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet("""
-            QLabel {
-                background-color: transparent;
-                color: #FFFFFF;
-                font-family: "Segoe UI Emoji";
-                font-size: 12pt;
-                padding: 0px;
-                margin: 0px;
-            }
-        """)
-
-        self.table.setCellWidget(row, col, label)
+        self.force_windows_topmost(checked)
 
     def set_loading_row(self, row, pilot):
-        items = [
-            QTableWidgetItem(""),
-            QTableWidgetItem(""),
-            QTableWidgetItem(pilot),
-            QTableWidgetItem("..."),
-            QTableWidgetItem("..."),
-            QTableWidgetItem("loading"),
-            QTableWidgetItem("loading..."),
-        ]
-
-        for item in items:
-            item.setBackground(QColor(26, 29, 33, 220))
-            item.setForeground(QColor("#FFFFFF"))
-            item.setFont(self.table.font())
-
-        items[0].setTextAlignment(Qt.AlignCenter)
-        items[1].setTextAlignment(Qt.AlignCenter)
-        items[3].setTextAlignment(Qt.AlignCenter)
-        items[4].setTextAlignment(Qt.AlignCenter)
-        items[5].setTextAlignment(Qt.AlignCenter)
-
-        for col, item in enumerate(items):
-            self.table.setItem(row, col, item)
-
-        self.table.setCellWidget(row, 0, None)
-        self.table.setCellWidget(row, 1, None)
+        render_loading_row(self, row, pilot)
 
     def update_table(self, pilots):
         self.table.setRowCount(len(pilots))
-        self.status_label.setText(f"Status: loading pilots fast: {len(pilots)}")
 
         self.relations = {}
         self.row_character_ids = {}
@@ -427,6 +253,11 @@ class EveLocalScanner(QWidget):
         self.relations_running = False
         self.active_relation_workers.clear()
 
+        self.last_hover_row = None
+
+        if hasattr(self, "title_bar"):
+            self.title_bar.title.setText("EVE LOCAL INTEL SCANNER")
+
         for row, pilot in enumerate(pilots):
             self.set_loading_row(row, pilot)
 
@@ -435,143 +266,26 @@ class EveLocalScanner(QWidget):
             self.thread_pool.start(worker)
 
     def update_pilot_row(self, row, result):
-        danger_raw = result.get("danger", 0)
-        gang_raw = result.get("gang", 0)
-
-        try:
-            danger_value = int(str(danger_raw).replace(" ", "").strip())
-        except Exception:
-            danger_value = 0
-
-        try:
-            gang_value = int(str(gang_raw).replace(" ", "").strip())
-        except Exception:
-            gang_value = 0
-
-        ally = result.get("ally", "?")
-        pilot = result.get("pilot", "")
-        top_ships = result.get("top_ships", [])
-
-        ship_names = []
-
-        for ship in top_ships:
-            name = ship.get("name", "?")
-            ship_names.append(name)
-
-        top_ships_text = " | ".join(ship_names) if ship_names else "-"
-
-        items = [
-            QTableWidgetItem(""),
-            QTableWidgetItem(""),
-            QTableWidgetItem(pilot),
-            QTableWidgetItem(str(danger_value)),
-            QTableWidgetItem(str(gang_value)),
-            QTableWidgetItem(ally),
-            QTableWidgetItem(top_ships_text),
-        ]
-
-        character_id = result.get("character_id")
-
-        items[2].setData(Qt.UserRole, character_id)
-        items[6].setData(Qt.UserRole, top_ships)
-
-        bg_color = self.get_row_color(danger_value)
-
-        self.row_base_colors[row] = bg_color
-
-        if character_id:
-            self.row_character_ids[row] = character_id
-
-        for item in items:
-            item.setBackground(bg_color)
-            item.setForeground(QColor("#FFFFFF"))
-            item.setFont(self.table.font())
-
-        items[0].setTextAlignment(Qt.AlignCenter)
-        items[1].setTextAlignment(Qt.AlignCenter)
-        items[3].setTextAlignment(Qt.AlignCenter)
-        items[4].setTextAlignment(Qt.AlignCenter)
-        items[5].setTextAlignment(Qt.AlignCenter)
-
-        for col, item in enumerate(items):
-            self.table.setItem(row, col, item)
-
-        danger_emoji = self.get_danger_emoji(danger_value)
-        self.set_emoji_cell(row, 0, danger_emoji)
-
-        self.table.setCellWidget(row, 1, None)
-
-        if character_id:
-            cyno_loading = QLabel(self.spinner.current_frame())
-            cyno_loading.setAlignment(Qt.AlignCenter)
-            cyno_loading.setStyleSheet("""
-                QLabel {
-                    background-color: transparent;
-                    color: #FF9900;
-                    font-size: 12pt;
-                    font-weight: bold;
-                }
-            """)
-
-            self.spinner.add(row, cyno_loading)
-            self.table.setCellWidget(row, 1, cyno_loading)
-
-            cyno_worker = CynoWorker(row, character_id)
-            cyno_worker.signals.finished.connect(self.update_cyno_cell)
-            self.cyno_pool.start(cyno_worker)
-
-        self.pending_pilots -= 1
-
-        if self.pending_pilots <= 0:
-            self.start_relations_scan()
-
-        self.status_label.setText("Status: fast data updated, cyno loading...")
+        render_pilot_row(self, row, result)
 
     def update_cyno_cell(self, row, cyno):
-        self.spinner.remove(row)
-        self.table.setCellWidget(row, 1, None)
-
-        if not cyno:
-            empty = QLabel("")
-            empty.setAlignment(Qt.AlignCenter)
-            empty.setStyleSheet("background-color: transparent;")
-            self.table.setCellWidget(row, 1, empty)
-            return
-
-        emoji = QLabel("💥")
-        emoji.setAlignment(Qt.AlignCenter)
-        emoji.setStyleSheet("""
-            QLabel {
-                background-color: transparent;
-                color: #FFFFFF;
-                font-family: "Segoe UI Emoji";
-                font-size: 14pt;
-                padding: 0px;
-                margin: 0px;
-            }
-        """)
-
-        self.table.setCellWidget(row, 1, emoji)
+        render_cyno_cell(self, row, cyno)
 
     def start_relations_scan(self):
         if self.relations_running:
             return
 
         if len(self.row_character_ids) < 2:
-            self.status_label.setText("Status: not enough pilots for relations")
             return
 
         ids = sorted(self.row_character_ids.values())
         relations_key = ",".join(str(x) for x in ids)
 
         if relations_key == self.last_relations_key and self.relations:
-            self.status_label.setText("Status: relations already loaded")
             return
 
         self.last_relations_key = relations_key
         self.relations_running = True
-
-        self.status_label.setText("Status: scanning pilot relations...")
 
         worker = RelationWorker(dict(self.row_character_ids))
         worker.signals.finished.connect(self.update_relations)
@@ -582,12 +296,10 @@ class EveLocalScanner(QWidget):
     def update_relations(self, relations):
         self.relations_running = False
         self.active_relation_workers.clear()
-
         self.relations = relations or {}
 
-        links = sum(len(v) for v in self.relations.values())
-
-        self.status_label.setText(f"Status: relations updated ({links} links)")
+        if self.last_hover_row is not None:
+            self.highlight_relation_rows(self.last_hover_row)
 
     def clear_relation_highlight(self):
         for row, bg_color in self.row_base_colors.items():
@@ -598,13 +310,16 @@ class EveLocalScanner(QWidget):
                     item.setBackground(bg_color)
 
     def highlight_relation_rows(self, row):
+        if row < 0 or row >= self.table.rowCount():
+            return
+
+        self.last_hover_row = row
         self.clear_relation_highlight()
 
-        active_color = QColor("#334466")
-        related_color = QColor("#1F4D2E")
+        active_color = self.make_color("#334466")
+        related_color = self.make_color("#1F4D2E")
 
         related_rows = self.relations.get(row, [])
-
         rows_to_highlight = [row] + related_rows
 
         for highlight_row in rows_to_highlight:
@@ -616,88 +331,29 @@ class EveLocalScanner(QWidget):
                 if item:
                     item.setBackground(color)
 
-    def get_resize_edges(self, pos):
-        edges = Qt.Edges()
+        if hasattr(self, "title_bar"):
+            self.title_bar.title.setText(
+                f"EVE LOCAL INTEL SCANNER  |  linked pilots: {len(related_rows)}"
+            )
 
-        x = pos.x()
-        y = pos.y()
-        w = self.width()
-        h = self.height()
-        m = self.resize_margin
+    def make_color(self, color_hex):
+        from PySide6.QtGui import QColor
 
-        if x <= m:
-            edges |= Qt.LeftEdge
+        return QColor(color_hex)
 
-        if x >= w - m:
-            edges |= Qt.RightEdge
+    def on_table_row_hovered(self, row):
+        self.highlight_relation_rows(row)
 
-        if y <= m:
-            edges |= Qt.TopEdge
+    def on_table_mouse_left(self):
+        self.last_hover_row = None
+        self.clear_relation_highlight()
 
-        if y >= h - m:
-            edges |= Qt.BottomEdge
-
-        return edges
-
-    def update_resize_cursor(self, edges):
-        if not edges:
-            self.unsetCursor()
-            return
-
-        left = bool(edges & Qt.LeftEdge)
-        right = bool(edges & Qt.RightEdge)
-        top = bool(edges & Qt.TopEdge)
-        bottom = bool(edges & Qt.BottomEdge)
-
-        if (left and top) or (right and bottom):
-            self.setCursor(Qt.SizeFDiagCursor)
-        elif (right and top) or (left and bottom):
-            self.setCursor(Qt.SizeBDiagCursor)
-        elif left or right:
-            self.setCursor(Qt.SizeHorCursor)
-        elif top or bottom:
-            self.setCursor(Qt.SizeVerCursor)
-        else:
-            self.unsetCursor()
+        if hasattr(self, "title_bar"):
+            self.title_bar.title.setText("EVE LOCAL INTEL SCANNER")
 
     def eventFilter(self, obj, event):
-        # Hover relations over table
-        if obj == self.table.viewport():
-            if event.type() == QEvent.MouseMove:
-                index = self.table.indexAt(event.pos())
-
-                if index.isValid():
-                    self.highlight_relation_rows(index.row())
-
-            elif event.type() == QEvent.Leave:
-                self.clear_relation_highlight()
-
-        # Resize frameless window from edges
-        if isinstance(obj, QWidget) and obj.window() == self:
-            if event.type() == QEvent.MouseMove:
-                if not self.isMaximized():
-                    local_pos = event.position().toPoint()
-                    window_pos = obj.mapTo(self, local_pos)
-
-                    edges = self.get_resize_edges(window_pos)
-                    self.update_resize_cursor(edges)
-
-            elif event.type() == QEvent.MouseButtonPress:
-                if event.button() == Qt.LeftButton and not self.isMaximized():
-                    local_pos = event.position().toPoint()
-                    window_pos = obj.mapTo(self, local_pos)
-
-                    edges = self.get_resize_edges(window_pos)
-
-                    if edges:
-                        window = self.windowHandle()
-
-                        if window:
-                            window.startSystemResize(edges)
-                            return True
-
-            elif event.type() == QEvent.Leave:
-                self.unsetCursor()
+        if handle_resize_event(self, obj, event):
+            return True
 
         return super().eventFilter(obj, event)
 
@@ -712,9 +368,6 @@ class EveLocalScanner(QWidget):
 
             if character_id:
                 webbrowser.open(f"https://zkillboard.com/character/{character_id}/")
-                self.status_label.setText("Status: opened pilot zKill")
-            else:
-                self.status_label.setText("Status: no character id")
 
             return
 
@@ -722,20 +375,13 @@ class EveLocalScanner(QWidget):
             top_ships = item.data(Qt.UserRole)
 
             if not top_ships:
-                self.status_label.setText("Status: no top ships data")
                 return
 
             first_ship = top_ships[0]
             ship_type_id = first_ship.get("ship_type_id")
-            ship_name = first_ship.get("name", "ship")
 
             if ship_type_id:
                 webbrowser.open(f"https://zkillboard.com/ship/{ship_type_id}/")
-                self.status_label.setText(
-                    f"Status: opened zKill ship page: {ship_name}"
-                )
-            else:
-                self.status_label.setText("Status: no ship id")
 
             return
 

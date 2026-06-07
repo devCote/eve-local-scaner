@@ -25,12 +25,35 @@ def get_top_ship_ids_from_stats(stats: dict, limit: int = 3) -> list[int]:
     if not stats:
         return []
 
-    for block in stats.get("topAllTime", []):
-        if block.get("type") == "ship":
-            ships = block.get("data", [])
-            return [
-                ship["shipTypeID"] for ship in ships[:limit] if ship.get("shipTypeID")
-            ]
+    top_all_time = stats.get("topAllTime")
+
+    if not isinstance(top_all_time, list):
+        return []
+
+    for block in top_all_time:
+        if not isinstance(block, dict):
+            continue
+
+        if block.get("type") != "ship":
+            continue
+
+        ships = block.get("data")
+
+        if not isinstance(ships, list):
+            return []
+
+        result = []
+
+        for ship in ships[:limit]:
+            if not isinstance(ship, dict):
+                continue
+
+            ship_type_id = ship.get("shipTypeID")
+
+            if ship_type_id:
+                result.append(ship_type_id)
+
+        return result
 
     return []
 

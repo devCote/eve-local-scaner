@@ -3,14 +3,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtCore import QObject, Signal, QRunnable
 
 from cache import cache
-from zkill_client import (
-    get_recent_kills,
-    get_full_killmail,
-)
+from zkill_client import get_recent_kills
 
-KILL_LIMIT_PER_PILOT = 8
-MAX_FULL_KILLMAILS = 25
-MAX_WORKERS = 10
+
+KILL_LIMIT_PER_PILOT = 40
+MAX_WORKERS = 20
 TTL_RELATIONS = 300  # 5 минут
 
 
@@ -32,7 +29,66 @@ class RelationWorker(QRunnable):
             if character_id
         )
 
-        return "relations:" + ",".join(str(x) for x in ids)
+        return "relations:v10:" + ",".join(str(x) for x in ids)
+
+    def normalize_cached_relations(self, cached):
+        if not isinstance(cached, dict):
+            return {}
+
+        normalized = {}
+
+        for key, values in cached.items():
+            try:
+                character_id = int(key)
+            except Exception:
+                continue
+
+            if not isinstance(values, list):
+                continue
+
+            clean_values = []
+
+            for value in values:
+                try:
+                    clean_values.append(int(value))
+                except Exception:
+                    continue
+
+            if clean_values:
+                normalized[character_id] = clean_values
+
+        return normalized
+
+    def character_relations_to_row_relations(
+        self,
+        character_relations: dict[int, list[int]],
+        character_to_row: dict[int, int],
+    ):
+        row_relations = {}
+
+        for character_id, linked_ids in character_relations.items():
+            row = character_to_row.get(character_id)
+
+            if row is None:
+                continue
+
+            linked_rows = []
+
+            for linked_id in linked_ids:
+                linked_row = character_to_row.get(linked_id)
+
+                if linked_row is None:
+                    continue
+
+                if linked_row == row:
+                    continue
+
+                linked_rows.append(linked_row)
+
+            if linked_rows:
+                row_relations[row] = sorted(set(linked_rows))
+
+        return row_relations
 
     def load_recent_kills(self, character_id: int):
         kills = get_recent_kills(
@@ -43,54 +99,51 @@ class RelationWorker(QRunnable):
         result = []
 
         for kill in kills:
-            zkb = kill.get("zkb", {})
-
-            # solo killmail не нужен для поиска напарников
-            if zkb.get("solo") is True:
-                continue
-
             killmail_id = kill.get("killmail_id")
+            zkb = kill.get("zkb", {})
             killmail_hash = zkb.get("hash")
 
-            if not killmail_id or not killmail_hash:
+            if not killmail_id:
                 continue
 
             result.append(
                 {
                     "killmail_id": killmail_id,
                     "hash": killmail_hash,
+                    "character_id": character_id,
                 }
             )
 
         return result
 
-    def load_full_killmail(self, killmail):
-        killmail_id = killmail["killmail_id"]
-        killmail_hash = killmail["hash"]
+    def add_relation(self, relations, pilot_a, pilot_b):
+        if pilot_a == pilot_b:
+            return
 
-        data = get_full_killmail(
-            killmail_id,
-            killmail_hash,
-        )
+        if pilot_a not in relations:
+            relations[pilot_a] = set()
 
-        if not data:
-            return None
+        if pilot_b not in relations:
+            relations[pilot_b] = set()
 
-        return {
-            "killmail_id": killmail_id,
-            "data": data,
-        }
+        relations[pilot_a].add(pilot_b)
+        relations[pilot_b].add(pilot_a)
+
+    def add_group_relations(self, relations, pilots):
+        pilots = list(pilots)
+
+        if len(pilots) < 2:
+            return
+
+        for pilot_a in pilots:
+            for pilot_b in pilots:
+                if pilot_a == pilot_b:
+                    continue
+
+                self.add_relation(relations, pilot_a, pilot_b)
 
     def run(self):
         try:
-            cache_key = self.get_cache_key()
-            cached = cache.get(cache_key, ttl_seconds=TTL_RELATIONS)
-
-            if cached is not None:
-                print("[RELATIONS] cache hit")
-                self.signals.finished.emit(cached)
-                return
-
             character_to_row = {
                 character_id: row
                 for row, character_id in self.row_character_ids.items()
@@ -103,11 +156,25 @@ class RelationWorker(QRunnable):
                 self.signals.finished.emit({})
                 return
 
-            relations = {row: set() for row in self.row_character_ids.keys()}
+            cache_key = self.get_cache_key()
+            cached = cache.get(cache_key, ttl_seconds=TTL_RELATIONS)
 
-            all_killmails = {}
+            if cached is not None:
+                cached_character_relations = self.normalize_cached_relations(cached)
 
-            # 1. Параллельно берём recent kills всех пилотов
+                row_relations = self.character_relations_to_row_relations(
+                    cached_character_relations,
+                    character_to_row,
+                )
+
+                self.signals.finished.emit(row_relations)
+                return
+
+            character_relations = {character_id: set() for character_id in local_ids}
+
+            killmail_owners = {}
+
+            # Параллельно грузим recent kills всех локальных пилотов
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {
                     executor.submit(self.load_recent_kills, character_id): character_id
@@ -118,86 +185,43 @@ class RelationWorker(QRunnable):
                     try:
                         kills = future.result()
                     except Exception as e:
-                        self.log("recent kills error:", e)
+                        print("[RELATIONS] recent kills error:", e)
                         continue
 
                     for kill in kills:
-                        all_killmails[kill["killmail_id"]] = kill
+                        killmail_id = kill["killmail_id"]
+                        character_id = kill["character_id"]
 
-            if not all_killmails:
-                cache.set(cache_key, {})
-                self.signals.finished.emit({})
-                return
+                        if killmail_id not in killmail_owners:
+                            killmail_owners[killmail_id] = set()
 
-            # 2. Сортируем от новых к старым и режем общий лимит
-            sorted_killmails = sorted(
-                all_killmails.values(),
-                key=lambda item: item["killmail_id"],
-                reverse=True,
-            )
+                        killmail_owners[killmail_id].add(character_id)
 
-            limited_killmails = sorted_killmails[:MAX_FULL_KILLMAILS]
-
-            self.log("unique killmails:", len(all_killmails))
-            self.log("checking full killmails:", len(limited_killmails))
-
-            full_killmails = []
-
-            # 3. Параллельно грузим full killmail
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = [
-                    executor.submit(self.load_full_killmail, killmail)
-                    for killmail in limited_killmails
-                ]
-
-                for future in as_completed(futures):
-                    try:
-                        result = future.result()
-                    except Exception as e:
-                        self.log("full killmail error:", e)
-                        continue
-
-                    if result:
-                        full_killmails.append(result)
-
-            # 4. Строим связи только между attackers из local
-            for entry in full_killmails:
-                killmail = entry["data"]
-
-                local_attackers = set()
-
-                for attacker in killmail.get("attackers", []):
-                    attacker_id = attacker.get("character_id")
-
-                    if attacker_id in local_ids:
-                        local_attackers.add(attacker_id)
-
-                if len(local_attackers) < 2:
+            # Если один и тот же killmail_id встречается у нескольких пилотов —
+            # значит они участвовали в одном килле вместе
+            for killmail_id, owners in killmail_owners.items():
+                if len(owners) < 2:
                     continue
 
-                for pilot_a in local_attackers:
-                    row_a = character_to_row[pilot_a]
+                self.add_group_relations(character_relations, owners)
 
-                    for pilot_b in local_attackers:
-                        if pilot_a == pilot_b:
-                            continue
-
-                        row_b = character_to_row[pilot_b]
-                        relations[row_a].add(row_b)
-
-            clean_relations = {
-                row: sorted(list(related_rows))
-                for row, related_rows in relations.items()
-                if related_rows
+            clean_character_relations = {
+                character_id: sorted(list(linked_ids))
+                for character_id, linked_ids in character_relations.items()
+                if linked_ids
             }
 
-            total_links = sum(len(v) for v in clean_relations.values())
+            cache.set(cache_key, clean_character_relations)
 
-            cache.set(cache_key, clean_relations)
+            row_relations = self.character_relations_to_row_relations(
+                clean_character_relations,
+                character_to_row,
+            )
 
+            total_links = sum(len(v) for v in row_relations.values())
             print(f"[RELATIONS] done: {total_links} links")
 
-            self.signals.finished.emit(clean_relations)
+            self.signals.finished.emit(row_relations)
 
         except Exception as e:
             print("[RELATIONS] ERROR:", e)

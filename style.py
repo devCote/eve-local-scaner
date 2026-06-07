@@ -4,7 +4,7 @@ def apply_eve_style(app):
         background-color: rgba(16, 18, 20, 210);
         color: #D0D0D0;
         font-family: "Segoe UI";
-        font-size: 10pt;
+        font-size: 9pt;
     }
 
     QLabel {
@@ -12,17 +12,11 @@ def apply_eve_style(app):
         background-color: transparent;
     }
 
-    QCheckBox {
-        color: #D0D0D0;
-        spacing: 6px;
-        background-color: transparent;
-    }
-
     QPushButton {
         background-color: rgba(37, 42, 49, 220);
         color: #D0D0D0;
         border: 1px solid #3A4048;
-        padding: 6px;
+        padding: 4px 8px;
     }
 
     QPushButton:hover {
@@ -40,12 +34,17 @@ def apply_eve_style(app):
         color: #FFFFFF;
         gridline-color: #303744;
         border: 1px solid #3A4048;
-        selection-background-color: #FF9900;
-        selection-color: #000000;
+        selection-background-color: #334466;
+        selection-color: #FFFFFF;
     }
 
     QTableWidget::item {
-        background-color: transparent;
+        color: #FFFFFF;
+        padding: 2px;
+    }
+
+    QTableWidget::item:selected {
+        background-color: #334466;
         color: #FFFFFF;
     }
 
@@ -53,7 +52,7 @@ def apply_eve_style(app):
         background-color: rgba(37, 42, 49, 230);
         color: #FF9900;
         border: 1px solid #3A4048;
-        padding: 5px;
+        padding: 4px;
         font-weight: bold;
     }
     """)
