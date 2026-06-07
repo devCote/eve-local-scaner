@@ -1,8 +1,46 @@
+from pathlib import Path
+
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QLabel, QTableWidgetItem
+from PySide6.QtGui import QColor, QPixmap, QPainter
+from PySide6.QtWidgets import QLabel, QTableWidgetItem, QWidget
 
 from worker import CynoWorker
+from paths import icon_path
+
+
+CYNO_ICON_PATH = icon_path("cyno.png")
+
+
+class CenteredPixmapWidget(QWidget):
+    def __init__(self, icon_path, icon_size=15, parent=None):
+        super().__init__(parent)
+
+        self.icon_path = icon_path
+        self.icon_size = icon_size
+        self.pixmap = QPixmap(icon_path)
+
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background-color: transparent;")
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+
+        if self.pixmap.isNull():
+            return
+
+        scaled = self.pixmap.scaled(
+            self.icon_size,
+            self.icon_size,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.drawPixmap(x, y, scaled)
 
 
 def safe_int(value):
@@ -42,6 +80,17 @@ def format_top_ships(top_ships):
 def set_emoji_cell(window, row, col, emoji):
     window.table.setCellWidget(row, col, None)
 
+    item = window.table.item(row, col)
+
+    if item is None:
+        item = QTableWidgetItem("")
+        window.table.setItem(row, col, item)
+
+    item.setText("")
+    item.setTextAlignment(Qt.AlignCenter)
+    item.setBackground(window.row_base_colors.get(row, get_row_color(0)))
+    item.setForeground(QColor("#FFFFFF"))
+
     if not emoji:
         return
 
@@ -72,8 +121,10 @@ def set_loading_row(window, row, pilot):
         QTableWidgetItem("loading..."),
     ]
 
+    bg_color = QColor(26, 29, 33, 220)
+
     for item in items:
-        item.setBackground(QColor(26, 29, 33, 220))
+        item.setBackground(bg_color)
         item.setForeground(QColor("#FFFFFF"))
         item.setFont(window.table.font())
 
@@ -141,7 +192,7 @@ def render_pilot_row(window, row, result):
         get_danger_emoji(danger_value),
     )
 
-    window.table.setCellWidget(row, 1, None)
+    clear_cyno_cell(window, row)
 
     if character_id:
         start_cyno_worker(window, row, character_id)
@@ -152,20 +203,34 @@ def render_pilot_row(window, row, result):
         window.start_relations_scan()
 
 
-def start_cyno_worker(window, row, character_id):
-    cyno_loading = QLabel(window.spinner.current_frame())
-    cyno_loading.setAlignment(Qt.AlignCenter)
-    cyno_loading.setStyleSheet("""
-        QLabel {
-            background-color: transparent;
-            color: #FF9900;
-            font-size: 11pt;
-            font-weight: bold;
-        }
-    """)
+def clear_cyno_cell(window, row):
+    window.table.setCellWidget(row, 1, None)
 
-    window.spinner.add(row, cyno_loading)
-    window.table.setCellWidget(row, 1, cyno_loading)
+    item = window.table.item(row, 1)
+
+    if item is None:
+        item = QTableWidgetItem("")
+        window.table.setItem(row, 1, item)
+
+    item.setText("")
+    item.setTextAlignment(Qt.AlignCenter)
+    item.setBackground(window.row_base_colors.get(row, get_row_color(0)))
+    item.setForeground(QColor("#FFFFFF"))
+
+
+def start_cyno_worker(window, row, character_id):
+    window.table.setCellWidget(row, 1, None)
+
+    item = window.table.item(row, 1)
+
+    if item is None:
+        item = QTableWidgetItem("")
+        window.table.setItem(row, 1, item)
+
+    item.setText("◌")
+    item.setTextAlignment(Qt.AlignCenter)
+    item.setForeground(QColor("#FF3366"))
+    item.setBackground(window.row_base_colors.get(row, get_row_color(0)))
 
     cyno_worker = CynoWorker(row, character_id)
     cyno_worker.signals.finished.connect(window.update_cyno_cell)
@@ -176,24 +241,29 @@ def render_cyno_cell(window, row, cyno):
     window.spinner.remove(row)
     window.table.setCellWidget(row, 1, None)
 
+    item = window.table.item(row, 1)
+
+    if item is None:
+        item = QTableWidgetItem("")
+        window.table.setItem(row, 1, item)
+
+    item.setText("")
+    item.setTextAlignment(Qt.AlignCenter)
+    item.setForeground(QColor("#FFFFFF"))
+    item.setBackground(window.row_base_colors.get(row, get_row_color(0)))
+
     if not cyno:
-        empty = QLabel("")
-        empty.setAlignment(Qt.AlignCenter)
-        empty.setStyleSheet("background-color: transparent;")
-        window.table.setCellWidget(row, 1, empty)
         return
 
-    emoji = QLabel("📡")
-    emoji.setAlignment(Qt.AlignCenter)
-    emoji.setStyleSheet("""
-        QLabel {
-            background-color: transparent;
-            color: #FFFFFF;
-            font-family: "Segoe UI Emoji";
-            font-size: 12pt;
-            padding: 0px;
-            margin: 0px;
-        }
-    """)
+    if not Path(CYNO_ICON_PATH).exists():
+        item.setText("*")
+        item.setForeground(QColor("#FF3366"))
+        print("Cyno icon not found:", CYNO_ICON_PATH)
+        return
 
-    window.table.setCellWidget(row, 1, emoji)
+    icon_widget = CenteredPixmapWidget(
+        CYNO_ICON_PATH,
+        icon_size=15,
+    )
+
+    window.table.setCellWidget(row, 1, icon_widget)

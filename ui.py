@@ -1,7 +1,7 @@
 import sys
 import pyperclip
 
-from PySide6.QtCore import Qt, QThreadPool, QTimer
+from PySide6.QtCore import Qt, QThreadPool, QTimer, QSize
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -88,7 +88,7 @@ class EveLocalScanner(QWidget):
         self.main_panel.setObjectName("MainPanel")
         self.main_panel.setStyleSheet("""
             QFrame#MainPanel {
-                background-color: rgba(7, 8, 10, 235);
+                background-color: rgba(7, 8, 10, 185);
                 border-top: 1px solid #444A52;
                 border-left: 1px solid #444A52;
                 border-right: 1px solid #101216;
@@ -109,7 +109,7 @@ class EveLocalScanner(QWidget):
         self.tabs_bar.setFixedHeight(22)
         self.tabs_bar.setStyleSheet("""
             QFrame {
-                background-color: rgba(10, 11, 13, 238);
+                background-color: rgba(10, 11, 13, 175);
                 border-top: 1px solid #2F343B;
                 border-left: 1px solid #2F343B;
                 border-right: 1px solid #07080A;
@@ -180,12 +180,12 @@ class EveLocalScanner(QWidget):
         self.table.mouseLeft.connect(self.on_table_mouse_left)
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
 
-        self.table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeToContents
-        )
-        self.table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeToContents
-        )
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
+
+        self.table.setColumnWidth(0, 24)
+        self.table.setColumnWidth(1, 24)
+
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeToContents
@@ -202,7 +202,7 @@ class EveLocalScanner(QWidget):
 
         self.table.setStyleSheet("""
             QTableWidget {
-                background-color: rgba(8, 9, 11, 238);
+                background-color: rgba(8, 9, 11, 165);
                 border: 1px solid #252A31;
                 gridline-color: rgba(45, 50, 58, 130);
             }

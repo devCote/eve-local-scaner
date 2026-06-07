@@ -1,13 +1,12 @@
 from PySide6.QtCore import Qt, Signal, QEvent
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QTableWidget, QStyledItemDelegate, QStyle
 
 
 class RowHighlightDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         table = self.parent()
-
         row = index.row()
+
         color = None
 
         if hasattr(table, "highlight_rows"):
@@ -18,7 +17,6 @@ class RowHighlightDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, color)
             painter.restore()
 
-            # убираем системное выделение, чтобы оно не перебивало наш цвет
             option.state &= ~QStyle.State_Selected
             option.state &= ~QStyle.State_HasFocus
 
