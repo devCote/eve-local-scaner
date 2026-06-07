@@ -129,9 +129,7 @@ class CynoWorker(QRunnable):
     def run(self):
         try:
             cyno = has_cyno_history(
-                self.character_id,
-                limit=50,
-                days=28,
+                self.character_id, limit=20, days=20, max_killmails=5
             )
 
             self.signals.finished.emit(self.row, cyno)

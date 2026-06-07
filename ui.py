@@ -1,7 +1,7 @@
 import webbrowser
 import pyperclip
 
-from PySide6.QtCore import Qt, QThreadPool, QTimer
+from PySide6.QtCore import Qt, QThreadPool, QTimer, QEvent
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from parser import parse_pilots
 from worker import PilotWorker, CynoWorker
 from spinner import SpinnerManager
+from relations import RelationWorker
 
 
 class EveLocalScanner(QWidget):
@@ -39,6 +40,16 @@ class EveLocalScanner(QWidget):
         self.build_ui()
         self.start_clipboard_timer()
         self.spinner = SpinnerManager(self)
+
+        self.relations_pool = QThreadPool()
+        self.relations_pool.setMaxThreadCount(1)
+        self.relations_running = False
+
+        self.relations = {}
+        self.row_character_ids = {}
+        self.row_base_colors = {}
+        self.pending_pilots = 0
+        self.active_relation_workers = []
 
     def build_ui(self):
         layout = QVBoxLayout()
@@ -78,30 +89,39 @@ class EveLocalScanner(QWidget):
         layout.addLayout(controls)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["C", "Pilot", "Danger", "Gang", "Corp/Ally", "Top Ships"]
+            ["D", "C", "Pilot", "Danger", "Gang", "Corp/Ally", "Top Ships"]
         )
 
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents
         )
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeToContents
+            1, QHeaderView.ResizeToContents
         )
+
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeToContents
         )
         self.table.horizontalHeader().setSectionResizeMode(
             4, QHeaderView.ResizeToContents
         )
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeToContents
+        )
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
 
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.cellDoubleClicked.connect(self.on_cell_double_clicked)
+
+        self.table.setMouseTracking(True)
+        self.table.viewport().setMouseTracking(True)
+        self.table.itemEntered.connect(self.on_item_entered)
+        self.table.viewport().installEventFilter(self)
 
         layout.addWidget(self.table)
 
@@ -187,14 +207,11 @@ class EveLocalScanner(QWidget):
         self.update_table(pilots)
 
     def get_row_color(self, danger: int):
-        if danger >= 60:
-            return "#552222"
-        if danger >= 40:
-            return "#555022"
-        return "#225533"
+        return "#1A1D21"
 
     def set_loading_row(self, row, pilot):
         items = [
+            QTableWidgetItem(""),
             QTableWidgetItem(""),
             QTableWidgetItem(pilot),
             QTableWidgetItem("..."),
@@ -209,18 +226,24 @@ class EveLocalScanner(QWidget):
             item.setFont(self.table.font())
 
         items[0].setTextAlignment(Qt.AlignCenter)
-        items[2].setTextAlignment(Qt.AlignCenter)
+        items[1].setTextAlignment(Qt.AlignCenter)
         items[3].setTextAlignment(Qt.AlignCenter)
         items[4].setTextAlignment(Qt.AlignCenter)
+        items[5].setTextAlignment(Qt.AlignCenter)
 
         for col, item in enumerate(items):
             self.table.setItem(row, col, item)
 
-        self.table.setCellWidget(row, 0, None)
+        self.table.setCellWidget(row, 1, None)
 
     def update_table(self, pilots):
         self.table.setRowCount(len(pilots))
         self.status_label.setText(f"Status: loading pilots fast: {len(pilots)}")
+
+        self.relations = {}
+        self.row_character_ids = {}
+        self.row_base_colors = {}
+        self.pending_pilots = len(pilots)
 
         for row, pilot in enumerate(pilots):
             self.set_loading_row(row, pilot)
@@ -255,7 +278,21 @@ class EveLocalScanner(QWidget):
 
         top_ships_text = " | ".join(ship_names) if ship_names else "-"
 
+        def get_danger_emoji(danger):
+            if danger == 0:
+                return
+            if danger < 40:
+                return "🐻"
+            if danger > 80:
+                return "☠️"
+            if danger > 60:
+                return "💪🏼"
+            return ""
+
+        danger_emoji = get_danger_emoji(danger_value)
+
         items = [
+            QTableWidgetItem(danger_emoji),
             QTableWidgetItem(""),
             QTableWidgetItem(pilot),
             QTableWidgetItem(str(danger_value)),
@@ -264,12 +301,17 @@ class EveLocalScanner(QWidget):
             QTableWidgetItem(top_ships_text),
         ]
 
-        items[5].setData(Qt.UserRole, top_ships)
+        items[6].setData(Qt.UserRole, top_ships)
 
         character_id = result.get("character_id")
-        items[1].setData(Qt.UserRole, character_id)
+        items[2].setData(Qt.UserRole, character_id)
 
-        bg_color = QColor(self.get_row_color(danger_value))
+        bg_color = QColor("#1A1D21")
+
+        if character_id:
+            self.row_character_ids[row] = character_id
+
+        self.row_base_colors[row] = bg_color
 
         for item in items:
             item.setBackground(bg_color)
@@ -277,14 +319,15 @@ class EveLocalScanner(QWidget):
             item.setFont(self.table.font())
 
         items[0].setTextAlignment(Qt.AlignCenter)
-        items[2].setTextAlignment(Qt.AlignCenter)
+        items[1].setTextAlignment(Qt.AlignCenter)
         items[3].setTextAlignment(Qt.AlignCenter)
         items[4].setTextAlignment(Qt.AlignCenter)
+        items[5].setTextAlignment(Qt.AlignCenter)
 
         for col, item in enumerate(items):
             self.table.setItem(row, col, item)
 
-        self.table.setCellWidget(row, 0, None)
+        self.table.setCellWidget(row, 1, None)
 
         if character_id:
             cyno_loading = QLabel(self.spinner.current_frame())
@@ -299,18 +342,24 @@ class EveLocalScanner(QWidget):
             """)
 
             self.spinner.add(row, cyno_loading)
-            self.table.setCellWidget(row, 0, cyno_loading)
+            self.table.setCellWidget(row, 1, cyno_loading)
 
             cyno_worker = CynoWorker(row, character_id)
             cyno_worker.signals.finished.connect(self.update_cyno_cell)
             self.cyno_pool.start(cyno_worker)
+
+        self.pending_pilots -= 1
+        print("PENDING PILOTS:", self.pending_pilots)
+
+        if self.pending_pilots <= 0:
+            self.start_relations_scan()
 
         self.status_label.setText("Status: fast data updated, cyno loading...")
 
     def update_cyno_cell(self, row, cyno):
         self.spinner.remove(row)
 
-        self.table.setCellWidget(row, 0, None)
+        self.table.setCellWidget(row, 1, None)
 
         if not cyno:
             empty = QLabel("")
@@ -321,7 +370,7 @@ class EveLocalScanner(QWidget):
                         color: #FFFFFF;
                     }
                 """)
-            self.table.setCellWidget(row, 0, empty)
+            self.table.setCellWidget(row, 1, empty)
             return
 
         emoji = QLabel("💥")
@@ -337,7 +386,7 @@ class EveLocalScanner(QWidget):
                 }
             """)
 
-        self.table.setCellWidget(row, 0, emoji)
+        self.table.setCellWidget(row, 1, emoji)
 
     def on_cell_double_clicked(self, row, col):
         item = self.table.item(row, col)
@@ -346,7 +395,7 @@ class EveLocalScanner(QWidget):
             return
 
         # Double click on Pilot column -> open pilot zKill
-        if col == 1:
+        if col == 2:
             character_id = item.data(Qt.UserRole)
 
             if character_id:
@@ -358,7 +407,7 @@ class EveLocalScanner(QWidget):
             return
 
         # Double click on Top Ships column -> open first ship zKill page
-        if col == 5:
+        if col == 6:
             top_ships = item.data(Qt.UserRole)
 
             if not top_ships:
@@ -378,3 +427,81 @@ class EveLocalScanner(QWidget):
                 self.status_label.setText("Status: no ship id")
 
             return
+
+    def start_relations_scan(self):
+        if self.relations_running:
+            return
+
+        if len(self.row_character_ids) < 2:
+            self.status_label.setText("Status: not enough pilots for relations")
+            return
+
+        self.relations_running = True
+        self.status_label.setText("Status: scanning pilot relations...")
+
+        worker = RelationWorker(dict(self.row_character_ids))
+        worker.signals.finished.connect(self.update_relations)
+
+        self.active_relation_workers.append(worker)
+        self.relations_pool.start(worker)
+
+    def update_relations(self, relations):
+        self.relations_running = False
+        self.active_relation_workers.clear()
+
+        self.relations = relations or {}
+        links = sum(len(v) for v in self.relations.values())
+
+        print("UI RELATIONS:", self.relations)
+
+        self.status_label.setText(f"Status: relations updated ({links} links)")
+
+    def clear_relation_highlight(self):
+        for row, bg_color in self.row_base_colors.items():
+            for col in range(self.table.columnCount()):
+                item = self.table.item(row, col)
+
+                if item:
+                    item.setBackground(bg_color)
+
+    def highlight_relation_rows(self, row):
+        self.clear_relation_highlight()
+
+        active_color = QColor("#334466")
+        related_color = QColor("#1F4D2E")
+
+        related_rows = self.relations.get(row, [])
+
+        rows_to_highlight = [row] + related_rows
+
+        for highlight_row in rows_to_highlight:
+            color = active_color if highlight_row == row else related_color
+
+            for col in range(self.table.columnCount()):
+                item = self.table.item(highlight_row, col)
+
+                if item:
+                    item.setBackground(color)
+
+        self.status_label.setText(
+            f"Status: hover row {row}, linked pilots: {len(related_rows)}"
+        )
+
+    def on_item_entered(self, item):
+        if not item:
+            return
+
+        self.highlight_relation_rows(item.row())
+
+    def eventFilter(self, obj, event):
+        if obj == self.table.viewport():
+            if event.type() == QEvent.MouseMove:
+                index = self.table.indexAt(event.pos())
+
+                if index.isValid():
+                    self.highlight_relation_rows(index.row())
+
+            elif event.type() == QEvent.Leave:
+                self.clear_relation_highlight()
+
+        return super().eventFilter(obj, event)

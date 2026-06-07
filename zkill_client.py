@@ -170,8 +170,13 @@ def is_recent_killmail(loss, days: int = 28) -> bool:
         return False
 
 
-def has_cyno_history(character_id: int, limit: int = 50, days: int = 28) -> bool:
-    cache_key = f"zkill:cyno:{character_id}:{limit}"
+def has_cyno_history(
+    character_id: int,
+    limit: int = 20,
+    days: int = 20,
+    max_killmails: int = 5,
+) -> bool:
+    cache_key = f"zkill:cyno:v2:{character_id}:{limit}:{max_killmails}"
 
     cached = cache.get(cache_key, ttl_seconds=TTL_CYNO)
 
@@ -180,8 +185,11 @@ def has_cyno_history(character_id: int, limit: int = 50, days: int = 28) -> bool
 
     losses = get_recent_losses(character_id, limit=limit)
 
-    # zKill losses не содержит killmail_time, поэтому НЕ фильтруем по времени тут
-    losses_to_check = losses[:15]
+    if not losses:
+        cache.set(cache_key, False)
+        return False
+
+    losses_to_check = losses[:max_killmails]
 
     checked = 0
 
