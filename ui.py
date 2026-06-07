@@ -1,8 +1,8 @@
 import sys
-import webbrowser
 import pyperclip
 
 from PySide6.QtCore import Qt, QThreadPool, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
     QSizeGrip,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QHeaderView,
     QAbstractItemView,
+    QFrame,
 )
 
 from parser import parse_pilots
@@ -21,6 +22,7 @@ from spinner import SpinnerManager
 from relations import RelationWorker
 from title_bar import TitleBar
 from intel_table import IntelTable
+from browser_utils import open_url
 
 from row_renderer import (
     set_loading_row as render_loading_row,
@@ -36,11 +38,11 @@ class EveLocalScanner(QWidget):
         super().__init__()
 
         self.setWindowTitle("EVE Local Scanner")
-        self.resize(880, 520)
+        self.resize(760, 440)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setMinimumSize(620, 320)
+        self.setMinimumSize(560, 280)
 
         self.resize_margin = 8
 
@@ -82,26 +84,67 @@ class EveLocalScanner(QWidget):
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
 
-        self.main_panel = QWidget()
+        self.main_panel = QFrame()
         self.main_panel.setObjectName("MainPanel")
         self.main_panel.setStyleSheet("""
-            QWidget#MainPanel {
-                background-color: rgba(16, 18, 20, 240);
-                border: 1px solid #3A4048;
+            QFrame#MainPanel {
+                background-color: rgba(14, 16, 20, 245);
+                border-top: 1px solid #6A7078;
+                border-left: 1px solid #6A7078;
+                border-right: 1px solid #25282E;
+                border-bottom: 1px solid #25282E;
             }
         """)
 
         outer_layout.addWidget(self.main_panel)
 
         layout = QVBoxLayout(self.main_panel)
-        layout.setContentsMargins(8, 8, 8, 6)
+        layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
         self.title_bar = TitleBar(self)
         layout.addWidget(self.title_bar)
 
-        self.status_label = QLabel("Status: ready")
-        self.status_label.hide()
+        # тонкая инфо-панель как в EVE
+        self.info_bar = QFrame()
+        self.info_bar.setFixedHeight(20)
+        self.info_bar.setStyleSheet("""
+            QFrame {
+                background-color: rgba(22, 24, 29, 240);
+                border-top: 1px solid #555B63;
+                border-left: 1px solid #555B63;
+                border-right: 1px solid #2A2D33;
+                border-bottom: 1px solid #1A1C21;
+            }
+        """)
+
+        info_layout = QHBoxLayout(self.info_bar)
+        info_layout.setContentsMargins(6, 0, 6, 0)
+        info_layout.setSpacing(4)
+
+        self.info_label = QLabel("Overview")
+        self.info_label.setStyleSheet("""
+            QLabel {
+                color: #E2E5E8;
+                font-size: 8pt;
+                background: transparent;
+            }
+        """)
+
+        self.linked_label = QLabel("")
+        self.linked_label.setStyleSheet("""
+            QLabel {
+                color: #AEB6C0;
+                font-size: 8pt;
+                background: transparent;
+            }
+        """)
+
+        info_layout.addWidget(self.info_label)
+        info_layout.addStretch()
+        info_layout.addWidget(self.linked_label)
+
+        layout.addWidget(self.info_bar)
 
         self.table = IntelTable()
         self.table.setColumnCount(7)
@@ -111,15 +154,13 @@ class EveLocalScanner(QWidget):
 
         self.table.setAlternatingRowColors(False)
         self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setHighlightSections(False)
 
-        # Важно:
-        # отключаем системное выделение по клику.
-        # Теперь цвет строк меняется только через hover / linked pilots.
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setFocusPolicy(Qt.NoFocus)
-
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setShowGrid(True)
 
         self.table.rowHovered.connect(self.on_table_row_hovered)
         self.table.mouseLeft.connect(self.on_table_mouse_left)
@@ -143,6 +184,13 @@ class EveLocalScanner(QWidget):
         )
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
 
+        self.table.verticalHeader().setDefaultSectionSize(24)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: rgba(16, 18, 22, 250);
+            }
+        """)
+
         layout.addWidget(self.table, 1)
 
         bottom_bar = QHBoxLayout()
@@ -151,7 +199,7 @@ class EveLocalScanner(QWidget):
         bottom_bar.addStretch()
 
         self.size_grip = QSizeGrip(self.main_panel)
-        self.size_grip.setFixedSize(14, 14)
+        self.size_grip.setFixedSize(12, 12)
         bottom_bar.addWidget(self.size_grip)
 
         layout.addLayout(bottom_bar)
@@ -195,7 +243,6 @@ class EveLocalScanner(QWidget):
 
         self.last_clipboard_text = text
         self.last_pilots = pilots
-
         self.update_table(pilots)
 
     def force_windows_topmost(self, enabled: bool):
@@ -254,9 +301,9 @@ class EveLocalScanner(QWidget):
         self.active_relation_workers.clear()
 
         self.last_hover_row = None
-
-        if hasattr(self, "title_bar"):
-            self.title_bar.title.setText("EVE LOCAL INTEL SCANNER")
+        self.linked_label.setText("")
+        self.title_bar.title.setText("Local Intel")
+        self.info_label.setText("Overview")
 
         for row, pilot in enumerate(pilots):
             self.set_loading_row(row, pilot)
@@ -316,8 +363,8 @@ class EveLocalScanner(QWidget):
         self.last_hover_row = row
         self.clear_relation_highlight()
 
-        active_color = self.make_color("#334466")
-        related_color = self.make_color("#1F4D2E")
+        active_color = QColor("#334466")
+        related_color = QColor("#1F4D2E")
 
         related_rows = self.relations.get(row, [])
         rows_to_highlight = [row] + related_rows
@@ -331,15 +378,9 @@ class EveLocalScanner(QWidget):
                 if item:
                     item.setBackground(color)
 
-        if hasattr(self, "title_bar"):
-            self.title_bar.title.setText(
-                f"EVE LOCAL INTEL SCANNER  |  linked pilots: {len(related_rows)}"
-            )
-
-    def make_color(self, color_hex):
-        from PySide6.QtGui import QColor
-
-        return QColor(color_hex)
+        self.title_bar.title.setText("Local Intel")
+        self.info_label.setText(f"Pilot row {row + 1}")
+        self.linked_label.setText(f"linked pilots: {len(related_rows)}")
 
     def on_table_row_hovered(self, row):
         self.highlight_relation_rows(row)
@@ -347,9 +388,9 @@ class EveLocalScanner(QWidget):
     def on_table_mouse_left(self):
         self.last_hover_row = None
         self.clear_relation_highlight()
-
-        if hasattr(self, "title_bar"):
-            self.title_bar.title.setText("EVE LOCAL INTEL SCANNER")
+        self.title_bar.title.setText("Local Intel")
+        self.info_label.setText("Overview")
+        self.linked_label.setText("")
 
     def eventFilter(self, obj, event):
         if handle_resize_event(self, obj, event):
@@ -367,7 +408,7 @@ class EveLocalScanner(QWidget):
             character_id = item.data(Qt.UserRole)
 
             if character_id:
-                webbrowser.open(f"https://zkillboard.com/character/{character_id}/")
+                open_url(f"https://zkillboard.com/character/{character_id}/")
 
             return
 
@@ -381,7 +422,7 @@ class EveLocalScanner(QWidget):
             ship_type_id = first_ship.get("ship_type_id")
 
             if ship_type_id:
-                webbrowser.open(f"https://zkillboard.com/ship/{ship_type_id}/")
+                open_url(f"https://zkillboard.com/ship/{ship_type_id}/")
 
             return
 
@@ -390,5 +431,4 @@ class EveLocalScanner(QWidget):
         self.cyno_pool.clear()
         self.relations_pool.clear()
         self.active_relation_workers.clear()
-
         event.accept()
