@@ -1,87 +1,90 @@
 def apply_eve_style(app):
     app.setStyleSheet("""
     QWidget {
-        background-color: rgba(18, 20, 24, 235);
-        color: #C8CCD2;
+        background-color: rgba(10, 11, 13, 235);
+        color: #C7C9CC;
         font-family: "Segoe UI";
-        font-size: 8.5pt;
+        font-size: 8pt;
     }
 
     QLabel {
-        color: #C8CCD2;
+        color: #C7C9CC;
         background-color: transparent;
     }
 
     QPushButton {
-        background-color: rgba(38, 42, 48, 240);
-        color: #C8CCD2;
-        border: 1px solid #4A4E55;
-        padding: 2px 8px;
-        min-height: 20px;
+        background-color: rgba(24, 26, 30, 230);
+        color: #BFC3C8;
+        border: 1px solid #343840;
+        padding: 1px 6px;
+        min-height: 18px;
     }
 
     QPushButton:hover {
-        background-color: rgba(58, 62, 70, 245);
-        border: 1px solid #8E939B;
+        background-color: rgba(42, 46, 54, 240);
+        color: #FFFFFF;
+        border: 1px solid #69707A;
     }
 
     QPushButton:pressed {
-        background-color: rgba(80, 84, 92, 255);
+        background-color: rgba(70, 78, 92, 245);
         color: #FFFFFF;
     }
 
     QPushButton:checked {
-        background-color: rgba(65, 70, 80, 255);
-        color: #FFFFFF;
-        border: 1px solid #9AA1AA;
+        background-color: rgba(35, 60, 62, 245);
+        color: #B8FFF1;
+        border: 1px solid #4D8A86;
     }
 
     QTableWidget {
-        background-color: rgba(20, 22, 27, 245);
-        color: #D6D9DE;
-        gridline-color: rgba(70, 75, 82, 170);
-        border: 1px solid #4A4E55;
-        selection-background-color: rgba(70, 90, 130, 200);
-        selection-color: #FFFFFF;
+        background-color: rgba(9, 10, 12, 238);
+        alternate-background-color: rgba(14, 16, 19, 238);
+        color: #D0D2D5;
+        gridline-color: rgba(48, 52, 58, 150);
+        border: 1px solid #2D3138;
+        selection-background-color: transparent;
+        selection-color: #D0D2D5;
         outline: none;
     }
 
     QTableWidget::item {
-        color: #D6D9DE;
-        padding: 2px 6px;
+        color: #D0D2D5;
+        padding: 1px 5px;
         border: none;
     }
 
     QTableWidget::item:selected {
-        background-color: rgba(70, 90, 130, 200);
-        color: #FFFFFF;
+        background-color: transparent;
+        color: #D0D2D5;
     }
 
     QHeaderView::section {
-        background-color: rgba(28, 30, 36, 250);
-        color: #F2F2F2;
-        border-top: 1px solid #585D66;
-        border-left: 1px solid #585D66;
-        border-right: 1px solid #2A2D33;
-        border-bottom: 1px solid #2A2D33;
-        padding: 3px 6px;
+        background-color: rgba(18, 20, 24, 250);
+        color: #AEB4BC;
+        border-top: 1px solid #3F444C;
+        border-left: 1px solid #3F444C;
+        border-right: 1px solid #17191D;
+        border-bottom: 1px solid #17191D;
+        padding: 2px 5px;
+        font-size: 8pt;
         font-weight: normal;
     }
 
     QScrollBar:vertical {
-        background: rgba(24, 26, 30, 220);
-        width: 10px;
-        margin: 0;
-        border: 1px solid #3E434B;
+        background: rgba(9, 10, 12, 240);
+        width: 8px;
+        margin: 0px;
+        border: 1px solid #22262B;
     }
 
     QScrollBar::handle:vertical {
-        background: rgba(78, 84, 94, 230);
-        min-height: 20px;
+        background: rgba(64, 70, 78, 230);
+        min-height: 18px;
     }
 
     QScrollBar::handle:vertical:hover {
-        background: rgba(100, 108, 120, 240);
+        background: rgba(90, 98, 108, 240);
     }
 
     QScrollBar::add-line:vertical,
@@ -90,19 +93,15 @@ def apply_eve_style(app):
     }
 
     QScrollBar:horizontal {
-        background: rgba(24, 26, 30, 220);
-        height: 10px;
-        margin: 0;
-        border: 1px solid #3E434B;
+        background: rgba(9, 10, 12, 240);
+        height: 8px;
+        margin: 0px;
+        border: 1px solid #22262B;
     }
 
     QScrollBar::handle:horizontal {
-        background: rgba(78, 84, 94, 230);
-        min-width: 20px;
-    }
-
-    QScrollBar::handle:horizontal:hover {
-        background: rgba(100, 108, 120, 240);
+        background: rgba(64, 70, 78, 230);
+        min-width: 18px;
     }
 
     QScrollBar::add-line:horizontal,

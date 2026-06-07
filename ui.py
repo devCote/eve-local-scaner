@@ -88,68 +88,82 @@ class EveLocalScanner(QWidget):
         self.main_panel.setObjectName("MainPanel")
         self.main_panel.setStyleSheet("""
             QFrame#MainPanel {
-                background-color: rgba(14, 16, 20, 245);
-                border-top: 1px solid #6A7078;
-                border-left: 1px solid #6A7078;
-                border-right: 1px solid #25282E;
-                border-bottom: 1px solid #25282E;
+                background-color: rgba(7, 8, 10, 235);
+                border-top: 1px solid #444A52;
+                border-left: 1px solid #444A52;
+                border-right: 1px solid #101216;
+                border-bottom: 1px solid #101216;
             }
         """)
 
         outer_layout.addWidget(self.main_panel)
 
         layout = QVBoxLayout(self.main_panel)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(2)
 
         self.title_bar = TitleBar(self)
         layout.addWidget(self.title_bar)
 
-        # тонкая инфо-панель как в EVE
-        self.info_bar = QFrame()
-        self.info_bar.setFixedHeight(20)
-        self.info_bar.setStyleSheet("""
+        self.tabs_bar = QFrame()
+        self.tabs_bar.setFixedHeight(22)
+        self.tabs_bar.setStyleSheet("""
             QFrame {
-                background-color: rgba(22, 24, 29, 240);
-                border-top: 1px solid #555B63;
-                border-left: 1px solid #555B63;
-                border-right: 1px solid #2A2D33;
-                border-bottom: 1px solid #1A1C21;
+                background-color: rgba(10, 11, 13, 238);
+                border-top: 1px solid #2F343B;
+                border-left: 1px solid #2F343B;
+                border-right: 1px solid #07080A;
+                border-bottom: 1px solid #07080A;
             }
         """)
 
-        info_layout = QHBoxLayout(self.info_bar)
-        info_layout.setContentsMargins(6, 0, 6, 0)
-        info_layout.setSpacing(4)
+        tabs_layout = QHBoxLayout(self.tabs_bar)
+        tabs_layout.setContentsMargins(4, 0, 4, 0)
+        tabs_layout.setSpacing(8)
 
-        self.info_label = QLabel("Overview")
-        self.info_label.setStyleSheet("""
-            QLabel {
-                color: #E2E5E8;
-                font-size: 8pt;
-                background: transparent;
-            }
-        """)
+        tab_names = [
+            "General",
+            "Targets",
+            "Intel",
+            "Relations",
+            "All",
+        ]
+
+        for index, tab_name in enumerate(tab_names):
+            tab = QLabel(tab_name)
+            tab.setStyleSheet(f"""
+                QLabel {{
+                    color: {"#A9F5E0" if index == 0 else "#8F959C"};
+                    font-size: 8pt;
+                    background-color: transparent;
+                    border-bottom: {"1px solid #39C7B5" if index == 0 else "none"};
+                    padding-left: 2px;
+                    padding-right: 2px;
+                }}
+            """)
+            tabs_layout.addWidget(tab)
+
+        tabs_layout.addStretch()
 
         self.linked_label = QLabel("")
         self.linked_label.setStyleSheet("""
             QLabel {
-                color: #AEB6C0;
+                color: #8F959C;
                 font-size: 8pt;
                 background: transparent;
             }
         """)
+        tabs_layout.addWidget(self.linked_label)
 
-        info_layout.addWidget(self.info_label)
-        info_layout.addStretch()
-        info_layout.addWidget(self.linked_label)
+        layout.addWidget(self.tabs_bar)
 
-        layout.addWidget(self.info_bar)
+        self.status_label = QLabel("Status: ready")
+        self.status_label.hide()
 
         self.table = IntelTable()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["D", "C", "Pilot", "Danger", "Gang", "Corp/Ally", "Top Ships"]
+            ["", "", "Pilot", "Danger", "Gang", "Corp/Ally", "Top Ships"]
         )
 
         self.table.setAlternatingRowColors(False)
@@ -184,10 +198,13 @@ class EveLocalScanner(QWidget):
         )
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
 
-        self.table.verticalHeader().setDefaultSectionSize(24)
+        self.table.verticalHeader().setDefaultSectionSize(22)
+
         self.table.setStyleSheet("""
             QTableWidget {
-                background-color: rgba(16, 18, 22, 250);
+                background-color: rgba(8, 9, 11, 238);
+                border: 1px solid #252A31;
+                gridline-color: rgba(45, 50, 58, 130);
             }
         """)
 
@@ -199,7 +216,7 @@ class EveLocalScanner(QWidget):
         bottom_bar.addStretch()
 
         self.size_grip = QSizeGrip(self.main_panel)
-        self.size_grip.setFixedSize(12, 12)
+        self.size_grip.setFixedSize(10, 10)
         bottom_bar.addWidget(self.size_grip)
 
         layout.addLayout(bottom_bar)
@@ -302,8 +319,7 @@ class EveLocalScanner(QWidget):
 
         self.last_hover_row = None
         self.linked_label.setText("")
-        self.title_bar.title.setText("Local Intel")
-        self.info_label.setText("Overview")
+        self.title_bar.title.setText("Overview (Local Intel)")
 
         for row, pilot in enumerate(pilots):
             self.set_loading_row(row, pilot)
@@ -349,37 +365,30 @@ class EveLocalScanner(QWidget):
             self.highlight_relation_rows(self.last_hover_row)
 
     def clear_relation_highlight(self):
-        for row, bg_color in self.row_base_colors.items():
-            for col in range(self.table.columnCount()):
-                item = self.table.item(row, col)
-
-                if item:
-                    item.setBackground(bg_color)
+        if hasattr(self.table, "clear_highlight_rows"):
+            self.table.clear_highlight_rows()
 
     def highlight_relation_rows(self, row):
         if row < 0 or row >= self.table.rowCount():
             return
 
         self.last_hover_row = row
-        self.clear_relation_highlight()
 
-        active_color = QColor("#334466")
-        related_color = QColor("#1F4D2E")
+        active_color = QColor("#2F5F8F")  # строка под мышкой
+        related_color = QColor("#1F5A32")  # linked pilots
 
         related_rows = self.relations.get(row, [])
-        rows_to_highlight = [row] + related_rows
 
-        for highlight_row in rows_to_highlight:
-            color = active_color if highlight_row == row else related_color
+        highlight_rows = {
+            row: active_color,
+        }
 
-            for col in range(self.table.columnCount()):
-                item = self.table.item(highlight_row, col)
+        for related_row in related_rows:
+            highlight_rows[related_row] = related_color
 
-                if item:
-                    item.setBackground(color)
+        if hasattr(self.table, "set_highlight_rows"):
+            self.table.set_highlight_rows(highlight_rows)
 
-        self.title_bar.title.setText("Local Intel")
-        self.info_label.setText(f"Pilot row {row + 1}")
         self.linked_label.setText(f"linked pilots: {len(related_rows)}")
 
     def on_table_row_hovered(self, row):
@@ -388,8 +397,7 @@ class EveLocalScanner(QWidget):
     def on_table_mouse_left(self):
         self.last_hover_row = None
         self.clear_relation_highlight()
-        self.title_bar.title.setText("Local Intel")
-        self.info_label.setText("Overview")
+        self.title_bar.title.setText("Overview (Local Intel)")
         self.linked_label.setText("")
 
     def eventFilter(self, obj, event):

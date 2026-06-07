@@ -9,71 +9,67 @@ class TitleBar(QWidget):
         self.parent_window = parent
 
         self.setObjectName("TitleBar")
-        self.setFixedHeight(26)
+        self.setFixedHeight(22)
 
         layout = QHBoxLayout()
-        layout.setContentsMargins(6, 2, 6, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(5, 1, 4, 1)
+        layout.setSpacing(3)
 
-        self.title = QLabel("Local Intel")
+        self.title = QLabel("Overview (Local Intel)")
         self.title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.title.setStyleSheet("""
             QLabel {
-                color: #E5E8EC;
-                font-size: 8.5pt;
+                color: #D6D8DC;
+                font-size: 8pt;
                 font-weight: normal;
                 background-color: transparent;
             }
         """)
 
-        self.top_button = QPushButton("▲")
+        self.top_button = QPushButton("●")
         self.top_button.setCheckable(True)
 
         self.minimize_button = QPushButton("—")
         self.close_button = QPushButton("×")
 
-        for button in [
-            self.top_button,
-            self.minimize_button,
-            self.close_button,
-        ]:
-            button.setFixedSize(22, 18)
+        for button in [self.top_button, self.minimize_button, self.close_button]:
+            button.setFixedSize(20, 16)
             button.setCursor(Qt.PointingHandCursor)
             button.setStyleSheet("""
                 QPushButton {
-                    background-color: rgba(34, 37, 42, 240);
-                    color: #D0D3D8;
-                    border: 1px solid #555B64;
+                    background-color: rgba(18, 20, 24, 235);
+                    color: #AEB4BC;
+                    border: 1px solid #343840;
                     padding: 0px;
-                    font-size: 8pt;
+                    font-size: 7.5pt;
                 }
 
                 QPushButton:hover {
-                    background-color: rgba(58, 62, 70, 250);
+                    background-color: rgba(42, 46, 54, 245);
                     color: #FFFFFF;
-                    border: 1px solid #8F98A3;
+                    border: 1px solid #68707A;
                 }
 
                 QPushButton:checked {
-                    background-color: rgba(75, 80, 90, 250);
-                    color: #FFFFFF;
-                    border: 1px solid #A0A8B2;
+                    background-color: rgba(35, 65, 65, 245);
+                    color: #9FFFF0;
+                    border: 1px solid #4D8A86;
                 }
             """)
 
         self.close_button.setStyleSheet("""
             QPushButton {
-                background-color: rgba(34, 37, 42, 240);
-                color: #D0D3D8;
-                border: 1px solid #555B64;
+                background-color: rgba(18, 20, 24, 235);
+                color: #AEB4BC;
+                border: 1px solid #343840;
                 padding: 0px;
                 font-size: 8pt;
             }
 
             QPushButton:hover {
-                background-color: rgba(120, 45, 45, 250);
+                background-color: rgba(100, 36, 36, 245);
                 color: #FFFFFF;
-                border: 1px solid #D07A7A;
+                border: 1px solid #A05A5A;
             }
         """)
 
@@ -91,11 +87,11 @@ class TitleBar(QWidget):
 
         self.setStyleSheet("""
             QWidget#TitleBar {
-                background-color: rgba(26, 28, 34, 248);
-                border-top: 1px solid #666C75;
-                border-left: 1px solid #666C75;
-                border-right: 1px solid #2B2E34;
-                border-bottom: 1px solid #1D1F24;
+                background-color: rgba(12, 13, 15, 248);
+                border-top: 1px solid #3D424A;
+                border-left: 1px solid #3D424A;
+                border-right: 1px solid #101216;
+                border-bottom: 1px solid #07080A;
             }
         """)
 
