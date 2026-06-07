@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
 )
 
 from parser import parse_pilots
-from worker import PilotWorker
+from worker import PilotWorker, CynoWorker
+from spinner import SpinnerManager
 
 
 class EveLocalScanner(QWidget):
@@ -30,10 +31,14 @@ class EveLocalScanner(QWidget):
         self.last_pilots = []
 
         self.thread_pool = QThreadPool()
-        self.thread_pool.setMaxThreadCount(8)
+        self.thread_pool.setMaxThreadCount(12)
+
+        self.cyno_pool = QThreadPool()
+        self.cyno_pool.setMaxThreadCount(3)
 
         self.build_ui()
         self.start_clipboard_timer()
+        self.spinner = SpinnerManager(self)
 
     def build_ui(self):
         layout = QVBoxLayout()
@@ -101,7 +106,7 @@ class EveLocalScanner(QWidget):
         layout.addWidget(self.table)
 
         self.footer_label = QLabel(
-            "Copy local from EVE: Ctrl+A → Ctrl+C | Double click Top Ships to open latest loss"
+            "Copy local from EVE: Ctrl+A → Ctrl+C | Cyno loads separately"
         )
         self.footer_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.footer_label)
@@ -200,7 +205,7 @@ class EveLocalScanner(QWidget):
 
         for item in items:
             item.setBackground(QColor("#1A1D21"))
-            item.setForeground(QColor("#D0D0D0"))
+            item.setForeground(QColor("#FFFFFF"))
             item.setFont(self.table.font())
 
         items[0].setTextAlignment(Qt.AlignCenter)
@@ -215,7 +220,7 @@ class EveLocalScanner(QWidget):
 
     def update_table(self, pilots):
         self.table.setRowCount(len(pilots))
-        self.status_label.setText(f"Status: loading pilots: {len(pilots)}")
+        self.status_label.setText(f"Status: loading pilots fast: {len(pilots)}")
 
         for row, pilot in enumerate(pilots):
             self.set_loading_row(row, pilot)
@@ -238,9 +243,6 @@ class EveLocalScanner(QWidget):
         except Exception:
             gang_value = 0
 
-        danger_text = str(danger_value)
-        gang_text = str(gang_value)
-
         ally = result.get("ally", "?")
         pilot = result.get("pilot", "")
         top_ships = result.get("top_ships", [])
@@ -256,19 +258,22 @@ class EveLocalScanner(QWidget):
         items = [
             QTableWidgetItem(""),
             QTableWidgetItem(pilot),
-            QTableWidgetItem(danger_text),
-            QTableWidgetItem(gang_text),
+            QTableWidgetItem(str(danger_value)),
+            QTableWidgetItem(str(gang_value)),
             QTableWidgetItem(ally),
             QTableWidgetItem(top_ships_text),
         ]
 
         items[5].setData(Qt.UserRole, top_ships)
 
+        character_id = result.get("character_id")
+        items[1].setData(Qt.UserRole, character_id)
+
         bg_color = QColor(self.get_row_color(danger_value))
 
         for item in items:
             item.setBackground(bg_color)
-            item.setForeground(QColor("#D0D0D0"))
+            item.setForeground(QColor("#FFFFFF"))
             item.setFont(self.table.font())
 
         items[0].setTextAlignment(Qt.AlignCenter)
@@ -281,22 +286,58 @@ class EveLocalScanner(QWidget):
 
         self.table.setCellWidget(row, 0, None)
 
-        if result.get("cyno"):
-            emoji = QLabel("💥")
+        if character_id:
+            cyno_loading = QLabel(self.spinner.current_frame())
+            cyno_loading.setAlignment(Qt.AlignCenter)
+            cyno_loading.setStyleSheet("""
+                QLabel {
+                    background-color: transparent;
+                    color: #FF9900;
+                    font-size: 12pt;
+                    font-weight: bold;
+                }
+            """)
 
-            emoji.setStyleSheet("""
+            self.spinner.add(row, cyno_loading)
+            self.table.setCellWidget(row, 0, cyno_loading)
+
+            cyno_worker = CynoWorker(row, character_id)
+            cyno_worker.signals.finished.connect(self.update_cyno_cell)
+            self.cyno_pool.start(cyno_worker)
+
+        self.status_label.setText("Status: fast data updated, cyno loading...")
+
+    def update_cyno_cell(self, row, cyno):
+        self.spinner.remove(row)
+
+        self.table.setCellWidget(row, 0, None)
+
+        if not cyno:
+            empty = QLabel("")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setStyleSheet("""
+                    QLabel {
+                        background-color: transparent;
+                        color: #FFFFFF;
+                    }
+                """)
+            self.table.setCellWidget(row, 0, empty)
+            return
+
+        emoji = QLabel("💥")
+        emoji.setAlignment(Qt.AlignCenter)
+        emoji.setStyleSheet("""
                 QLabel {
                     background-color: transparent;
                     color: #FFFFFF;
-                    font-family: "Segoe UI Emoji", "Noto Color Emoji", "Segoe UI Symbol";
+                    font-family: "Segoe UI Emoji";
                     font-size: 14pt;
                     padding: 0px;
                     margin: 0px;
                 }
             """)
-            self.table.setCellWidget(row, 0, emoji)
 
-        self.status_label.setText("Status: updated")
+        self.table.setCellWidget(row, 0, emoji)
 
     def on_cell_double_clicked(self, row, col):
         item = self.table.item(row, col)
@@ -304,32 +345,36 @@ class EveLocalScanner(QWidget):
         if not item:
             return
 
+        # Double click on Pilot column -> open pilot zKill
         if col == 1:
-            pilot_item = self.table.item(row, 1)
+            character_id = item.data(Qt.UserRole)
 
-            if pilot_item:
-                pilot_name = pilot_item.text()
-                self.status_label.setText(f"Status: pilot selected: {pilot_name}")
+            if character_id:
+                webbrowser.open(f"https://zkillboard.com/character/{character_id}/")
+                self.status_label.setText("Status: opened pilot zKill")
+            else:
+                self.status_label.setText("Status: no character id")
 
             return
 
-        if col != 5:
-            return
+        # Double click on Top Ships column -> open first ship zKill page
+        if col == 5:
+            top_ships = item.data(Qt.UserRole)
 
-        top_ships = item.data(Qt.UserRole)
-
-        if not top_ships:
-            self.status_label.setText("Status: no top ships data")
-            return
-
-        for ship in top_ships:
-            url = ship.get("last_loss_url")
-
-            if url:
-                webbrowser.open(url)
-                self.status_label.setText(
-                    f"Status: opened latest loss for {ship.get('name')}"
-                )
+            if not top_ships:
+                self.status_label.setText("Status: no top ships data")
                 return
 
-        self.status_label.setText("Status: no latest loss found for top ships")
+            first_ship = top_ships[0]
+            ship_type_id = first_ship.get("ship_type_id")
+            ship_name = first_ship.get("name", "ship")
+
+            if ship_type_id:
+                webbrowser.open(f"https://zkillboard.com/ship/{ship_type_id}/")
+                self.status_label.setText(
+                    f"Status: opened zKill ship page: {ship_name}"
+                )
+            else:
+                self.status_label.setText("Status: no ship id")
+
+            return

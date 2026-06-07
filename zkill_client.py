@@ -200,10 +200,8 @@ def has_cyno_history(character_id: int, limit: int = 50, days: int = 28) -> bool
             continue
 
         if has_cyno_fit(full_killmail):
-            print(f"Cyno found for {character_id} after {checked} killmails")
             cache.set(cache_key, True)
             return True
 
-    print(f"No cyno found for {character_id}, checked {checked} killmails")
     cache.set(cache_key, False)
     return False
