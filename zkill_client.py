@@ -11,10 +11,10 @@ ESI_URL = "https://esi.evetech.net/latest"
 
 TIMEOUT = 8
 
-TTL_STATS = 1800          # 30 минут
-TTL_RECENT = 900          # 15 минут
-TTL_KILLMAIL = 86400      # 24 часа
-TTL_CYNO = 1800           # 30 минут
+TTL_STATS = 1800  # 30 минут
+TTL_RECENT = 900  # 15 минут
+TTL_KILLMAIL = 86400  # 24 часа
+TTL_CYNO = 1800  # 30 минут
 
 CYNO_MODULE_IDS = {
     21096,  # Cynosural Field Generator I
@@ -30,9 +30,7 @@ def get_json_cached(cache_key: str, url: str, ttl_seconds: int):
 
     try:
         response = requests.get(
-            url,
-            headers={"User-Agent": USER_AGENT},
-            timeout=TIMEOUT
+            url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT
         )
 
         response.raise_for_status()
@@ -162,9 +160,7 @@ def is_recent_killmail(loss, days: int = 28) -> bool:
         return False
 
     try:
-        kill_dt = datetime.fromisoformat(
-            kill_time.replace("Z", "+00:00")
-        )
+        kill_dt = datetime.fromisoformat(kill_time.replace("Z", "+00:00"))
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
