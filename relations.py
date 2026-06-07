@@ -8,11 +8,8 @@ from zkill_client import (
     get_full_killmail,
 )
 
-
-DEBUG_RELATIONS = False
-
-KILL_LIMIT_PER_PILOT = 10
-MAX_FULL_KILLMAILS = 50
+KILL_LIMIT_PER_PILOT = 8
+MAX_FULL_KILLMAILS = 25
 MAX_WORKERS = 10
 TTL_RELATIONS = 300  # 5 минут
 
@@ -27,10 +24,6 @@ class RelationWorker(QRunnable):
 
         self.row_character_ids = row_character_ids
         self.signals = RelationWorkerSignals()
-
-    def log(self, *args):
-        if DEBUG_RELATIONS:
-            print("[RELATIONS]", *args)
 
     def get_cache_key(self):
         ids = sorted(
