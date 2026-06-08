@@ -2,17 +2,21 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPixmap, QPainter
-from PySide6.QtWidgets import QLabel, QTableWidgetItem, QWidget
+from PySide6.QtWidgets import QTableWidgetItem, QWidget
 
 from worker import CynoWorker
 from paths import icon_path
 
 
 CYNO_ICON_PATH = icon_path("cyno.png")
+BEAR_ICON_PATH = icon_path("bear.png")
+SKULL_ICON_PATH = icon_path("skull.png")
+
+ICON_SIZE = 15
 
 
 class CenteredPixmapWidget(QWidget):
-    def __init__(self, icon_path, icon_size=15, parent=None):
+    def __init__(self, icon_path, icon_size=ICON_SIZE, parent=None):
         super().__init__(parent)
 
         self.icon_path = icon_path
@@ -50,21 +54,23 @@ def safe_int(value):
         return 0
 
 
-def get_row_color(danger: int):
-    return QColor(26, 29, 33, 220)
+def get_row_color(danger: int, window=None):
+    if window is not None and hasattr(window, "ui_bg_color"):
+        bg = QColor(window.ui_bg_color)
+        alpha = max(0, min(255, int(getattr(window, "ui_alpha", 180)) - 70))
+        return QColor(bg.red(), bg.green(), bg.blue(), alpha)
+
+    return QColor(26, 29, 33, 120)
 
 
-def get_danger_emoji(danger: int):
-    if danger < 40:
-        return "🐻"
+def get_danger_icon_path(danger: int):
+    if 0 < danger <= 50:
+        return BEAR_ICON_PATH
 
     if danger >= 80:
-        return "☠️"
+        return SKULL_ICON_PATH
 
-    if danger > 60:
-        return "💪🏼"
-
-    return ""
+    return None
 
 
 def format_top_ships(top_ships):
@@ -77,9 +83,7 @@ def format_top_ships(top_ships):
     return " | ".join(ship_names) if ship_names else "-"
 
 
-def set_emoji_cell(window, row, col, emoji):
-    window.table.setCellWidget(row, col, None)
-
+def prepare_cell_item(window, row, col):
     item = window.table.item(row, col)
 
     if item is None:
@@ -88,26 +92,42 @@ def set_emoji_cell(window, row, col, emoji):
 
     item.setText("")
     item.setTextAlignment(Qt.AlignCenter)
-    item.setBackground(window.row_base_colors.get(row, get_row_color(0)))
+    item.setBackground(window.row_base_colors.get(row, get_row_color(0, window)))
     item.setForeground(QColor("#FFFFFF"))
 
-    if not emoji:
+    return item
+
+
+def set_icon_cell(window, row, col, icon_path_value, icon_size=ICON_SIZE):
+    window.table.setCellWidget(row, col, None)
+
+    item = prepare_cell_item(window, row, col)
+
+    if not icon_path_value:
         return
 
-    label = QLabel(emoji)
-    label.setAlignment(Qt.AlignCenter)
-    label.setStyleSheet("""
-        QLabel {
-            background-color: transparent;
-            color: #FFFFFF;
-            font-family: "Segoe UI Emoji";
-            font-size: 11pt;
-            padding: 0px;
-            margin: 0px;
-        }
-    """)
+    if not Path(icon_path_value).exists():
+        print("Icon not found:", icon_path_value)
+        return
 
-    window.table.setCellWidget(row, col, label)
+    icon_widget = CenteredPixmapWidget(
+        icon_path_value,
+        icon_size=icon_size,
+    )
+
+    window.table.setCellWidget(row, col, icon_widget)
+
+
+def set_danger_cell(window, row, danger_value):
+    icon_path_value = get_danger_icon_path(danger_value)
+
+    set_icon_cell(
+        window,
+        row,
+        0,
+        icon_path_value,
+        icon_size=ICON_SIZE,
+    )
 
 
 def set_loading_row(window, row, pilot):
@@ -121,7 +141,7 @@ def set_loading_row(window, row, pilot):
         QTableWidgetItem("loading..."),
     ]
 
-    bg_color = QColor(26, 29, 33, 220)
+    bg_color = get_row_color(0, window)
 
     for item in items:
         item.setBackground(bg_color)
@@ -165,7 +185,7 @@ def render_pilot_row(window, row, result):
     items[2].setData(Qt.UserRole, character_id)
     items[6].setData(Qt.UserRole, top_ships)
 
-    bg_color = get_row_color(danger_value)
+    bg_color = get_row_color(danger_value, window)
     window.row_base_colors[row] = bg_color
 
     if character_id:
@@ -185,12 +205,7 @@ def render_pilot_row(window, row, result):
     for col, item in enumerate(items):
         window.table.setItem(row, col, item)
 
-    set_emoji_cell(
-        window,
-        row,
-        0,
-        get_danger_emoji(danger_value),
-    )
+    set_danger_cell(window, row, danger_value)
 
     clear_cyno_cell(window, row)
 
@@ -205,32 +220,15 @@ def render_pilot_row(window, row, result):
 
 def clear_cyno_cell(window, row):
     window.table.setCellWidget(row, 1, None)
-
-    item = window.table.item(row, 1)
-
-    if item is None:
-        item = QTableWidgetItem("")
-        window.table.setItem(row, 1, item)
-
-    item.setText("")
-    item.setTextAlignment(Qt.AlignCenter)
-    item.setBackground(window.row_base_colors.get(row, get_row_color(0)))
-    item.setForeground(QColor("#FFFFFF"))
+    prepare_cell_item(window, row, 1)
 
 
 def start_cyno_worker(window, row, character_id):
     window.table.setCellWidget(row, 1, None)
 
-    item = window.table.item(row, 1)
-
-    if item is None:
-        item = QTableWidgetItem("")
-        window.table.setItem(row, 1, item)
-
+    item = prepare_cell_item(window, row, 1)
     item.setText("◌")
-    item.setTextAlignment(Qt.AlignCenter)
     item.setForeground(QColor("#FF3366"))
-    item.setBackground(window.row_base_colors.get(row, get_row_color(0)))
 
     cyno_worker = CynoWorker(row, character_id)
     cyno_worker.signals.finished.connect(window.update_cyno_cell)
@@ -241,29 +239,16 @@ def render_cyno_cell(window, row, cyno):
     window.spinner.remove(row)
     window.table.setCellWidget(row, 1, None)
 
-    item = window.table.item(row, 1)
-
-    if item is None:
-        item = QTableWidgetItem("")
-        window.table.setItem(row, 1, item)
-
+    item = prepare_cell_item(window, row, 1)
     item.setText("")
-    item.setTextAlignment(Qt.AlignCenter)
-    item.setForeground(QColor("#FFFFFF"))
-    item.setBackground(window.row_base_colors.get(row, get_row_color(0)))
 
     if not cyno:
         return
 
-    if not Path(CYNO_ICON_PATH).exists():
-        item.setText("*")
-        item.setForeground(QColor("#FF3366"))
-        print("Cyno icon not found:", CYNO_ICON_PATH)
-        return
-
-    icon_widget = CenteredPixmapWidget(
+    set_icon_cell(
+        window,
+        row,
+        1,
         CYNO_ICON_PATH,
-        icon_size=15,
+        icon_size=ICON_SIZE,
     )
-
-    window.table.setCellWidget(row, 1, icon_widget)

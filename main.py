@@ -1,6 +1,12 @@
 import sys
 import os
 
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+    "--disable-gpu "
+    "--disable-dev-shm-usage "
+    "--no-sandbox"
+)
+
 from PySide6.QtWidgets import QApplication
 
 from style import apply_eve_style

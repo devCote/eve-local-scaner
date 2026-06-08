@@ -1,7 +1,7 @@
 def apply_eve_style(app):
     app.setStyleSheet("""
     QWidget {
-        background-color: rgba(10, 11, 13, 235);
+        background-color: transparent;
         color: #C7C9CC;
         font-family: "Segoe UI";
         font-size: 8pt;
@@ -13,7 +13,7 @@ def apply_eve_style(app):
     }
 
     QPushButton {
-        background-color: rgba(24, 26, 30, 230);
+        background-color: rgba(24, 26, 30, 185);
         color: #BFC3C8;
         border: 1px solid #343840;
         padding: 1px 6px;
@@ -38,8 +38,8 @@ def apply_eve_style(app):
     }
 
     QTableWidget {
-        background-color: rgba(9, 10, 12, 238);
-        alternate-background-color: rgba(14, 16, 19, 238);
+        background-color: rgba(9, 10, 12, 150);
+        alternate-background-color: rgba(14, 16, 19, 110);
         color: #D0D2D5;
         gridline-color: rgba(48, 52, 58, 150);
         border: 1px solid #2D3138;
@@ -60,7 +60,7 @@ def apply_eve_style(app):
     }
 
     QHeaderView::section {
-        background-color: rgba(18, 20, 24, 250);
+        background-color: rgba(18, 20, 24, 195);
         color: #AEB4BC;
         border-top: 1px solid #3F444C;
         border-left: 1px solid #3F444C;
