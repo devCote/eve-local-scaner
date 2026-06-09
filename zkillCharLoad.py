@@ -11,8 +11,8 @@ def get_character_script() -> str:
     return r"""
 (function () {
     const path = window.location.pathname;
-    if (!/^\/character\/\d+\/?/.test(path)) {
-        return;
+    if (!/^\/(?:character|alliance|corporation|region|system)\/\d+\/?/.test(path)) {
+    return;
     }
 
     const CHARACTER_STYLE_ID = "eve-local-zkill-character-style-v5-desktop";

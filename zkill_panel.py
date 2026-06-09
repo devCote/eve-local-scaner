@@ -29,6 +29,138 @@ except Exception:
     WEBENGINE_AVAILABLE = False
 
 
+def get_consent_script() -> str:
+    """Remove/click zKill cookie/privacy/adblock overlays before applying page loaders."""
+    return r"""
+(function () {
+    function textOf(el) {
+        return (el && (el.innerText || el.textContent || el.value || "") || "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase();
+    }
+
+    function clickConsentButtons() {
+        const buttons = Array.from(document.querySelectorAll(
+            "button, a, input[type='button'], input[type='submit']"
+        ));
+
+        for (const btn of buttons) {
+            const txt = textOf(btn);
+
+            if (
+                txt === "agree" ||
+                txt === "i agree" ||
+                txt === "accept" ||
+                txt === "accept all" ||
+                txt === "allow all" ||
+                txt === "ok" ||
+                txt === "got it" ||
+                txt.includes("agree") ||
+                txt.includes("accept all") ||
+                txt.includes("allow all")
+            ) {
+                try { btn.click(); } catch (e) {}
+            }
+        }
+    }
+
+    function removeBlockingOverlays() {
+        const selectors = [
+            /* Google Funding Choices / privacy consent */
+            ".fc-consent-root",
+            ".fc-dialog-container",
+            ".fc-dialog-overlay",
+            ".fc-footer-buttons-container",
+            ".fc-ab-root",
+            ".fc-ab-dialog",
+            ".fc-whitelist-root",
+            "[id^='googlefc']",
+            "iframe[src*='fundingchoices']",
+            "iframe[src*='google']",
+
+            /* Quantcast / CMP */
+            ".qc-cmp2-container",
+            ".qc-cmp2-main",
+            ".qc-cmp-cleanslate",
+            "#qc-cmp2-ui",
+            "#qc-cmp2-container",
+
+            /* Bootstrap/modals/backdrops */
+            ".modal-backdrop",
+            ".modal.show",
+            ".modal",
+
+            /* Common ad containers */
+            "[id*='google_ads']",
+            "[id*='google_ads_iframe']",
+            "[id*='div-gpt-ad']",
+            "[class*='ad-container']",
+            "[class*='advert']"
+        ];
+
+        for (const selector of selectors) {
+            document.querySelectorAll(selector).forEach(el => {
+                try {
+                    el.remove();
+                } catch (e) {
+                    el.style.setProperty("display", "none", "important");
+                    el.style.setProperty("visibility", "hidden", "important");
+                    el.style.setProperty("pointer-events", "none", "important");
+                }
+            });
+        }
+
+        document.documentElement.style.setProperty("overflow", "auto", "important");
+        document.body.style.setProperty("overflow", "auto", "important");
+        document.body.style.setProperty("pointer-events", "auto", "important");
+        document.body.classList.remove("modal-open");
+    }
+
+    function removeAdblockOverlay() {
+        const nodes = Array.from(document.querySelectorAll("div, section, aside, dialog"));
+
+        for (const el of nodes) {
+            const txt = textOf(el);
+
+            if (
+                txt.includes("support us by disabling your ad blocker") ||
+                txt.includes("disable my adblocker") ||
+                txt.includes("ad blocker") ||
+                txt.includes("adblocker")
+            ) {
+                try {
+                    el.remove();
+                } catch (e) {
+                    el.style.setProperty("display", "none", "important");
+                    el.style.setProperty("visibility", "hidden", "important");
+                    el.style.setProperty("pointer-events", "none", "important");
+                }
+            }
+        }
+    }
+
+    function clean() {
+        clickConsentButtons();
+        removeBlockingOverlays();
+        removeAdblockOverlay();
+    }
+
+    clean();
+
+    if (!window.__ELS_CONSENT_CLEANER_INSTALLED__) {
+        window.__ELS_CONSENT_CLEANER_INSTALLED__ = true;
+        let tries = 0;
+        const timer = setInterval(function () {
+            clean();
+            tries += 1;
+            if (tries > 40) clearInterval(timer);
+        }, 250);
+    }
+})();
+"""
+
+
 class AdBlocker(QWebEngineUrlRequestInterceptor):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,6 +180,11 @@ class AdBlocker(QWebEngineUrlRequestInterceptor):
             "ads-twitter.com",
             "amazon-adsystem.com",
             "static.cloudflareinsights.com",
+            "btloader.com",
+            "inmobi.com",
+            "confiant-integrations.net",
+            "fuseplatform.net",
+            "fundingchoicesmessages.google.com",
         ]
 
         self.blocked_url_parts = [
@@ -64,6 +201,8 @@ class AdBlocker(QWebEngineUrlRequestInterceptor):
             "cloudflareinsights",
             "markeedragon",
             "patreon",
+            "prebid",
+            "fundingchoices",
         ]
 
     def interceptRequest(self, info):
@@ -218,26 +357,45 @@ class ZkillPanel(QWidget):
         if not ok:
             return
 
-        self.inject_clean_zkill_css()
+        # zKill догружает cookie/adblock/killlist через JS, поэтому запускаем несколько раз.
+        self.apply_zkill_loader()
+        QTimer.singleShot(300, self.apply_zkill_loader)
+        QTimer.singleShot(800, self.apply_zkill_loader)
+        QTimer.singleShot(1800, self.apply_zkill_loader)
+        QTimer.singleShot(3200, self.apply_zkill_loader)
 
-        # zKill часто догружает killlist через JS, поэтому повторяем очистку
-        QTimer.singleShot(800, self.inject_clean_zkill_css)
-        QTimer.singleShot(1800, self.inject_clean_zkill_css)
-        QTimer.singleShot(3200, self.inject_clean_zkill_css)
-
-
-    def inject_clean_zkill_css(self):
+    def apply_zkill_loader(self):
         if not self.browser:
             return
 
+        page = self.browser.page()
         path = self.browser.url().path()
 
-        if path.startswith("/character/"):
-            self.browser.page().runJavaScript(get_character_script())
-            return
+        zkill_list_paths = (
+            "/character/",
+            "/system/",
+            "/corporation/",
+            "/alliance/",
+            "/region/",
+        )
 
-        if path.startswith("/kill/"):
-            self.browser.page().runJavaScript(get_kill_script())
+        def run_loader_after_consent():
+            if path.startswith(zkill_list_paths):
+                page.runJavaScript(get_character_script())
+                return
+
+            if path.startswith("/kill/"):
+                page.runJavaScript(get_kill_script())
+                return
+
+            self.cleanup_custom_zkill_views()
+
+        # Сначала убираем cookie/privacy/adblock overlay, который перехватывает клики.
+        page.runJavaScript(get_consent_script())
+        QTimer.singleShot(120, run_loader_after_consent)
+
+    def cleanup_custom_zkill_views(self):
+        if not self.browser:
             return
 
         cleanup_script = r"""
@@ -245,7 +403,9 @@ class ZkillPanel(QWidget):
             const ids = [
                 "eve-local-zkill-style",
                 "eve-local-zkill-kill-style",
-                "eve-local-zkill-view"
+                "eve-local-zkill-view",
+                "eve-local-zkill-character-style-v5-desktop",
+                "eve-local-zkill-character-view"
             ];
 
             for (const id of ids) {
@@ -255,3 +415,7 @@ class ZkillPanel(QWidget):
         })();
         """
         self.browser.page().runJavaScript(cleanup_script)
+
+    # Старое имя оставлено для совместимости, если где-то в проекте оно вызывается.
+    def inject_clean_zkill_css(self):
+        self.apply_zkill_loader()
