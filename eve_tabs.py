@@ -9,6 +9,7 @@ class EveTabs(QWidget):
         super().__init__(parent)
 
         self.buttons = {}
+
         self.setObjectName("EveTabs")
         self.setFixedHeight(22)
 
@@ -21,7 +22,10 @@ class EveTabs(QWidget):
             button.setCheckable(True)
             button.setFixedHeight(18)
             button.setCursor(Qt.PointingHandCursor)
-            button.clicked.connect(lambda checked=False, name=tab_name: self.set_active(name))
+            button.clicked.connect(
+                lambda checked=False, name=tab_name: self.set_active(name)
+            )
+
             self.buttons[tab_name] = button
             self.layout.addWidget(button)
 
@@ -32,7 +36,8 @@ class EveTabs(QWidget):
         self.layout.addWidget(self.linked_label)
 
         self.set_active("General")
-        self.apply_colors("#2F343B", "#C7C9CC", 8, 180)
+
+        self.apply_colors("#2F343B", "#C7C9CC", 10, "#0b0b0b")
 
     def set_active(self, name):
         for tab_name, button in self.buttons.items():
@@ -46,15 +51,18 @@ class EveTabs(QWidget):
         else:
             self.linked_label.setText("")
 
-    def apply_colors(self, frame_color, text_color, font_size=8, alpha=180):
+    def apply_colors(self, frame_color, text_color, font_size=10, bg_color="#0b0b0b"):
         self.setStyleSheet(f"""
             QWidget#EveTabs {{
-                background-color: rgba(10, 11, 13, {alpha});
-                border: none;
+                background-color: rgba(10, 11, 13, 180);
+                border-top: 1px solid {frame_color};
+                border-left: 1px solid {frame_color};
+                border-right: 1px solid #07080A;
+                border-bottom: 1px solid #07080A;
             }}
 
             QPushButton {{
-                background-color: rgba(14, 16, 20, {max(40, alpha - 45)});
+                background-color: rgba(14, 16, 20, 120);
                 color: {text_color};
                 border: 1px solid transparent;
                 padding: 0px 8px;
@@ -62,13 +70,13 @@ class EveTabs(QWidget):
             }}
 
             QPushButton:hover {{
-                background-color: rgba(40, 45, 52, {min(255, alpha + 20)});
+                background-color: rgba(40, 45, 52, 180);
                 border: 1px solid {frame_color};
                 color: #FFFFFF;
             }}
 
             QPushButton:checked {{
-                background-color: rgba(18, 24, 26, {min(255, alpha + 35)});
+                background-color: rgba(18, 24, 26, 210);
                 color: #A9F5E0;
                 border-bottom: 1px solid #39C7B5;
             }}

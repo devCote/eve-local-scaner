@@ -12,7 +12,7 @@ CYNO_ICON_PATH = icon_path("cyno.png")
 BEAR_ICON_PATH = icon_path("bear.png")
 SKULL_ICON_PATH = icon_path("skull.png")
 
-ICON_SIZE = 15
+ICON_SIZE = 12
 
 
 class CenteredPixmapWidget(QWidget):
@@ -47,6 +47,7 @@ class CenteredPixmapWidget(QWidget):
         painter.drawPixmap(x, y, scaled)
 
 
+
 def safe_int(value):
     try:
         return int(str(value).replace(" ", "").strip())
@@ -54,13 +55,8 @@ def safe_int(value):
         return 0
 
 
-def get_row_color(danger: int, window=None):
-    if window is not None and hasattr(window, "ui_bg_color"):
-        bg = QColor(window.ui_bg_color)
-        alpha = max(0, min(255, int(getattr(window, "ui_alpha", 180)) - 70))
-        return QColor(bg.red(), bg.green(), bg.blue(), alpha)
-
-    return QColor(26, 29, 33, 120)
+def get_row_color(danger: int):
+    return QColor(26, 29, 33, 220)
 
 
 def get_danger_icon_path(danger: int):
@@ -77,7 +73,7 @@ def format_top_ships(top_ships):
     ship_names = []
 
     for ship in top_ships:
-        name = ship.get("name", "?")
+        name = ship.get("display_name") or ship.get("name", "?")
         ship_names.append(name)
 
     return " | ".join(ship_names) if ship_names else "-"
@@ -91,8 +87,8 @@ def prepare_cell_item(window, row, col):
         window.table.setItem(row, col, item)
 
     item.setText("")
-    item.setTextAlignment(Qt.AlignCenter)
-    item.setBackground(window.row_base_colors.get(row, get_row_color(0, window)))
+    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+    item.setBackground(window.row_base_colors.get(row, get_row_color(0)))
     item.setForeground(QColor("#FFFFFF"))
 
     return item
@@ -141,7 +137,7 @@ def set_loading_row(window, row, pilot):
         QTableWidgetItem("loading..."),
     ]
 
-    bg_color = get_row_color(0, window)
+    bg_color = QColor(26, 29, 33, 220)
 
     for item in items:
         item.setBackground(bg_color)
@@ -150,9 +146,11 @@ def set_loading_row(window, row, pilot):
 
     items[0].setTextAlignment(Qt.AlignCenter)
     items[1].setTextAlignment(Qt.AlignCenter)
-    items[3].setTextAlignment(Qt.AlignCenter)
-    items[4].setTextAlignment(Qt.AlignCenter)
-    items[5].setTextAlignment(Qt.AlignCenter)
+    items[2].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+    items[3].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+    items[4].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+    items[5].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+    items[6].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
 
     for col, item in enumerate(items):
         window.table.setItem(row, col, item)
@@ -185,7 +183,7 @@ def render_pilot_row(window, row, result):
     items[2].setData(Qt.UserRole, character_id)
     items[6].setData(Qt.UserRole, top_ships)
 
-    bg_color = get_row_color(danger_value, window)
+    bg_color = get_row_color(danger_value)
     window.row_base_colors[row] = bg_color
 
     if character_id:
@@ -198,9 +196,11 @@ def render_pilot_row(window, row, result):
 
     items[0].setTextAlignment(Qt.AlignCenter)
     items[1].setTextAlignment(Qt.AlignCenter)
-    items[3].setTextAlignment(Qt.AlignCenter)
-    items[4].setTextAlignment(Qt.AlignCenter)
-    items[5].setTextAlignment(Qt.AlignCenter)
+    items[2].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+    items[3].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+    items[4].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+    items[5].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+    items[6].setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
 
     for col, item in enumerate(items):
         window.table.setItem(row, col, item)
