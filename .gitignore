@@ -3,6 +3,7 @@ data/
 .venv/
 assets/
 __pycache__/
+installer_output/
 *.pyc
 *.pyo
 *.pyd
@@ -13,4 +14,10 @@ build/
 *.spec
 cache.json
 killmails/
-logs/
+logs/installer_output/
+build/
+dist/
+*.spec.bak
+installer_output/
+build/
+dist/
