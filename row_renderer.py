@@ -58,7 +58,7 @@ def safe_int(value):
 
 
 def get_row_color(danger: int):
-    return QColor(26, 29, 33, 220)
+    return QColor(0, 0, 0, 0)
 
 
 def get_danger_icon_path(danger: int):
@@ -139,7 +139,7 @@ def set_loading_row(window, row, pilot):
         QTableWidgetItem("loading..."),
     ]
 
-    bg_color = QColor(26, 29, 33, 220)
+    bg_color = QColor(0, 0, 0, 0)
 
     for item in items:
         item.setBackground(bg_color)

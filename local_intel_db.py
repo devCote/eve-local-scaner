@@ -5,26 +5,29 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
-from paths import EXE_DIR, SOURCE_DIR
+from paths import EXE_DIR, SOURCE_DIR, user_data_path
 
 
 DB_RELATIVE_PATH = Path("data") / "local_intel.sqlite"
 
 
 def get_db_path() -> Path:
-    """Find local_intel.sqlite both in dev folder and near compiled exe."""
-    candidates = [
+    writable_path = user_data_path(DB_RELATIVE_PATH)
+
+    if writable_path.exists():
+        return writable_path
+
+    legacy_candidates = [
         Path.cwd() / DB_RELATIVE_PATH,
         SOURCE_DIR / DB_RELATIVE_PATH,
         EXE_DIR / DB_RELATIVE_PATH,
     ]
 
-    for path in candidates:
+    for path in legacy_candidates:
         if path.exists():
             return path
 
-    # Default place for dev mode.
-    return SOURCE_DIR / DB_RELATIVE_PATH
+    return writable_path
 
 
 def db_exists() -> bool:
@@ -69,12 +72,20 @@ def _fetchall(query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         conn.close()
 
 
+def table_exists(table_name: str) -> bool:
+    row = _fetchone(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (table_name,),
+    )
+    return row is not None
+
+
 def get_kill_count(character_id: int) -> int:
     row = _fetchone(
         """
-        SELECT COUNT(DISTINCT killmail_id) AS count
-        FROM killmail_attackers
-        WHERE attacker_character_id = ?
+        SELECT COUNT(DISTINCT ka.killmail_id) AS count
+        FROM killmail_attackers ka
+        WHERE ka.attacker_character_id = ?
         """,
         (int(character_id),),
     )
@@ -84,8 +95,8 @@ def get_kill_count(character_id: int) -> int:
 def get_loss_count(character_id: int) -> int:
     row = _fetchone(
         """
-        SELECT COUNT(DISTINCT killmail_id) AS count
-        FROM killmail_attackers
+        SELECT COUNT(*) AS count
+        FROM killmails
         WHERE victim_character_id = ?
         """,
         (int(character_id),),
@@ -97,18 +108,18 @@ def get_recent_kills(character_id: int, limit: int = 10) -> list[dict]:
     rows = _fetchall(
         """
         SELECT
-            attacker_character_id,
-            killmail_id,
-            MAX(killmail_time) AS killmail_time,
-            victim_character_id,
-            victim_ship_type_id,
-            solar_system_id,
-            MAX(final_blow) AS final_blow,
-            MAX(damage_done) AS damage_done
-        FROM killmail_attackers
-        WHERE attacker_character_id = ?
-        GROUP BY killmail_id
-        ORDER BY killmail_time DESC
+            ka.attacker_character_id,
+            km.killmail_id,
+            km.killmail_time,
+            km.victim_character_id,
+            km.victim_ship_type_id,
+            km.solar_system_id,
+            ka.final_blow,
+            ka.damage_done
+        FROM killmail_attackers ka
+        JOIN killmails km ON km.killmail_id = ka.killmail_id
+        WHERE ka.attacker_character_id = ?
+        ORDER BY km.killmail_time DESC
         LIMIT ?
         """,
         (int(character_id), int(limit)),
@@ -139,13 +150,12 @@ def get_recent_losses(character_id: int, limit: int = 50) -> list[dict]:
         """
         SELECT
             killmail_id,
-            MAX(killmail_time) AS killmail_time,
+            killmail_time,
             victim_character_id,
             victim_ship_type_id,
             solar_system_id
-        FROM killmail_attackers
+        FROM killmails
         WHERE victim_character_id = ?
-        GROUP BY killmail_id
         ORDER BY killmail_time DESC
         LIMIT ?
         """,
@@ -170,21 +180,15 @@ def get_recent_losses(character_id: int, limit: int = 50) -> list[dict]:
 
 
 def get_last_lost_ships(character_id: int, limit: int = 3) -> list[dict]:
-    """Return the last ships lost by this pilot from local SQLite.
-
-    One row = one loss killmail where the pilot was the victim.
-    This is used for the UI "Last Ships" column.
-    """
     rows = _fetchall(
         """
         SELECT
             killmail_id,
-            MAX(killmail_time) AS killmail_time,
-            MAX(victim_ship_type_id) AS ship_type_id
-        FROM killmail_attackers
+            killmail_time,
+            victim_ship_type_id AS ship_type_id
+        FROM killmails
         WHERE victim_character_id = ?
           AND victim_ship_type_id IS NOT NULL
-        GROUP BY killmail_id
         ORDER BY killmail_time DESC
         LIMIT ?
         """,
@@ -212,11 +216,12 @@ def get_last_lost_ships(character_id: int, limit: int = 3) -> list[dict]:
 def get_top_destroyed_ships(character_id: int, limit: int = 3) -> list[dict]:
     rows = _fetchall(
         """
-        SELECT victim_ship_type_id AS ship_type_id, COUNT(DISTINCT killmail_id) AS count
-        FROM killmail_attackers
-        WHERE attacker_character_id = ?
-          AND victim_ship_type_id IS NOT NULL
-        GROUP BY victim_ship_type_id
+        SELECT km.victim_ship_type_id AS ship_type_id, COUNT(DISTINCT ka.killmail_id) AS count
+        FROM killmail_attackers ka
+        JOIN killmails km ON km.killmail_id = ka.killmail_id
+        WHERE ka.attacker_character_id = ?
+          AND km.victim_ship_type_id IS NOT NULL
+        GROUP BY km.victim_ship_type_id
         ORDER BY count DESC
         LIMIT ?
         """,
@@ -231,17 +236,13 @@ def get_top_destroyed_ships(character_id: int, limit: int = 3) -> list[dict]:
 
 
 def get_gang_stats(character_id: int) -> tuple[int, int, int]:
-    """Return (gang_ratio, solo_ratio, solo_kills) estimated from local attackers table."""
     rows = _fetchall(
         """
-        SELECT k.killmail_id, COUNT(a.attacker_character_id) AS attacker_count
-        FROM (
-            SELECT DISTINCT killmail_id
-            FROM killmail_attackers
-            WHERE attacker_character_id = ?
-        ) k
-        JOIN killmail_attackers a ON a.killmail_id = k.killmail_id
-        GROUP BY k.killmail_id
+        SELECT ka.killmail_id, COUNT(a.attacker_character_id) AS attacker_count
+        FROM killmail_attackers ka
+        JOIN killmail_attackers a ON a.killmail_id = ka.killmail_id
+        WHERE ka.attacker_character_id = ?
+        GROUP BY ka.killmail_id
         """,
         (int(character_id),),
     )
@@ -282,14 +283,6 @@ def get_local_stats(character_id: int) -> dict:
     }
 
 
-def table_exists(table_name: str) -> bool:
-    row = _fetchone(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
-        (table_name,),
-    )
-    return row is not None
-
-
 def get_cyno_count() -> int:
     if not table_exists("cyno_losses"):
         return 0
@@ -317,52 +310,33 @@ def print_local_db_health() -> None:
     db_path = get_db_path()
     print(f"[LOCAL DB] path: {db_path}")
     print(f"[LOCAL DB] exists: {db_path.exists()}")
-    if not db_path.exists():
-        return
-    print(f"[LOCAL DB] size GB: {db_path.stat().st_size / 1024 / 1024 / 1024:.2f}")
+
+    if db_path.exists():
+        print(f"[LOCAL DB] size GB: {db_path.stat().st_size / 1024 / 1024 / 1024:.2f}")
+
+    print(f"[LOCAL DB] killmails table: {table_exists('killmails')}")
+    print(f"[LOCAL DB] killmail_attackers table: {table_exists('killmail_attackers')}")
     print(f"[LOCAL DB] cyno_losses table: {table_exists('cyno_losses')}")
     print(f"[LOCAL DB] cyno rows: {get_cyno_count()}")
 
 
-def has_cyno_history(character_id: int, days: int = 40) -> bool:
-    if not table_exists("cyno_losses"):
-        print("[LOCAL DB] cyno_losses table not found")
-        return False
+def parse_z_time(value: str) -> datetime | None:
+    if not value:
+        return None
 
-    if days and int(days) > 0:
-        since = datetime.now(timezone.utc) - timedelta(days=int(days))
-        since_text = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-        row = _fetchone(
-            """
-            SELECT 1
-            FROM cyno_losses
-            WHERE character_id = ?
-              AND last_cyno_time >= ?
-            LIMIT 1
-            """,
-            (int(character_id), since_text),
-        )
-    else:
-        row = _fetchone(
-            """
-            SELECT 1
-            FROM cyno_losses
-            WHERE character_id = ?
-            LIMIT 1
-            """,
-            (int(character_id),),
-        )
-
-    return row is not None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
-def get_cyno_info(character_id: int, days: int = 40) -> dict | None:
+def get_cyno_loss(character_id: int, days: int | None = 40) -> dict | None:
     if not table_exists("cyno_losses"):
         return None
 
-    if days and int(days) > 0:
+    if days is not None:
         since = datetime.now(timezone.utc) - timedelta(days=int(days))
-        since_text = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        since_text = since.isoformat().replace("+00:00", "Z")
         row = _fetchone(
             """
             SELECT character_id, last_cyno_time, killmail_id, ship_type_id,
@@ -399,10 +373,11 @@ def get_linked_character_relations(character_ids: list[int], limit_killmails: in
     placeholders = ",".join("?" for _ in ids)
     rows = _fetchall(
         f"""
-        SELECT killmail_id, killmail_time, attacker_character_id
-        FROM killmail_attackers
-        WHERE attacker_character_id IN ({placeholders})
-        ORDER BY killmail_time DESC
+        SELECT ka.killmail_id, km.killmail_time, ka.attacker_character_id
+        FROM killmail_attackers ka
+        JOIN killmails km ON km.killmail_id = ka.killmail_id
+        WHERE ka.attacker_character_id IN ({placeholders})
+        ORDER BY km.killmail_time DESC
         LIMIT ?
         """,
         (*ids, int(limit_killmails)),
@@ -432,4 +407,42 @@ def get_linked_character_relations(character_ids: list[int], limit_killmails: in
         character_id: sorted(linked_ids)
         for character_id, linked_ids in relations.items()
         if linked_ids
+    }
+
+
+
+def has_cyno_history(
+    character_id: int,
+    limit: int = 50,
+    days: int = 40,
+    max_killmails: int = 15,
+) -> bool:
+    """Compatibility wrapper for old zkill_client imports.
+
+    The old online zKill cyno checker used this function name.
+    Now cyno detection is read from local SQLite cyno_losses table.
+    Extra args are kept so old calls do not crash.
+    """
+    row = get_cyno_loss(int(character_id), days=int(days) if days is not None else None)
+    return row is not None
+
+
+
+def get_cyno_info(character_id: int, days: int | None = 40) -> dict | None:
+    """Compatibility wrapper for zkill_client.
+
+    Returns detailed cyno info from local SQLite or None.
+    """
+    row = get_cyno_loss(int(character_id), days=days)
+    if not row:
+        return None
+
+    return {
+        "character_id": int(row.get("character_id") or character_id),
+        "last_cyno_time": row.get("last_cyno_time"),
+        "killmail_id": row.get("killmail_id"),
+        "ship_type_id": row.get("ship_type_id"),
+        "cyno_module_id": row.get("cyno_module_id"),
+        "cyno_module_name": row.get("cyno_module_name"),
+        "zkill_url": f"https://zkillboard.com/kill/{int(row['killmail_id'])}/" if row.get("killmail_id") else None,
     }

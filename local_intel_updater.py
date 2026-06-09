@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import sqlite3
 import tarfile
 import urllib.error
@@ -9,17 +10,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from paths import EXE_DIR
+from paths import USER_DATA_DIR, ensure_user_data_dirs
 
 
 DAYS_BACK = 40
+SCHEMA_VERSION = 2
+
 USER_AGENT = "EVE-Local-Intel-Scanner"
 BASE_URL = "https://data.everef.net/killmails/{year}/killmails-{date}.tar.bz2"
 
-ROOT_DIR = EXE_DIR
+ROOT_DIR = USER_DATA_DIR
 KILLMAILS_DIR = ROOT_DIR / "killmails"
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "local_intel.sqlite"
+UNAVAILABLE_ARCHIVES_PATH = ROOT_DIR / "unavailable_archives.json"
+UNAVAILABLE_TTL_SECONDS = 4 * 60 * 60  # 4 hours
 
 CYNO_MODULES = {
     21096: "Cynosural Field Generator I",
@@ -59,8 +64,99 @@ def archive_url_for_day(day) -> str:
 
 
 def ensure_folders():
+    ensure_user_data_dirs()
     KILLMAILS_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+
+
+def load_unavailable_archive_cache() -> dict:
+    try:
+        if not UNAVAILABLE_ARCHIVES_PATH.exists():
+            return {}
+
+        with UNAVAILABLE_ARCHIVES_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, dict):
+            return {}
+
+        return data
+
+    except Exception:
+        return {}
+
+
+def save_unavailable_archive_cache(data: dict) -> None:
+    try:
+        UNAVAILABLE_ARCHIVES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = UNAVAILABLE_ARCHIVES_PATH.with_suffix(UNAVAILABLE_ARCHIVES_PATH.suffix + ".tmp")
+
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        tmp.replace(UNAVAILABLE_ARCHIVES_PATH)
+
+    except Exception as e:
+        print(f"[KILLMAILS] unavailable cache save error: {e}")
+
+
+def unavailable_cache_get(archive_name: str) -> dict | None:
+    data = load_unavailable_archive_cache()
+    item = data.get(archive_name)
+
+    if not isinstance(item, dict):
+        return None
+
+    checked_at = float(item.get("checked_at", 0) or 0)
+
+    if time.time() - checked_at > UNAVAILABLE_TTL_SECONDS:
+        data.pop(archive_name, None)
+        save_unavailable_archive_cache(data)
+        return None
+
+    return item
+
+
+def unavailable_cache_set(archive_name: str, reason: str = "404") -> None:
+    data = load_unavailable_archive_cache()
+    data[archive_name] = {
+        "checked_at": time.time(),
+        "reason": str(reason),
+    }
+    save_unavailable_archive_cache(data)
+
+
+def unavailable_cache_clear(archive_name: str) -> None:
+    data = load_unavailable_archive_cache()
+
+    if archive_name in data:
+        data.pop(archive_name, None)
+        save_unavailable_archive_cache(data)
+
+
+def unavailable_cache_prune(required_names: set[str]) -> None:
+    data = load_unavailable_archive_cache()
+
+    if not data:
+        return
+
+    now = time.time()
+    changed = False
+
+    for archive_name, item in list(data.items()):
+        checked_at = 0
+
+        if isinstance(item, dict):
+            checked_at = float(item.get("checked_at", 0) or 0)
+
+        if archive_name not in required_names or now - checked_at > UNAVAILABLE_TTL_SECONDS:
+            data.pop(archive_name, None)
+            changed = True
+
+    if changed:
+        save_unavailable_archive_cache(data)
 
 
 def download_archive(day, progress_callback: ProgressCallback | None = None, current=None, total=None) -> bool:
@@ -68,8 +164,16 @@ def download_archive(day, progress_callback: ProgressCallback | None = None, cur
     archive_path = KILLMAILS_DIR / archive_name
 
     if archive_path.exists() and archive_path.stat().st_size > 0:
+        unavailable_cache_clear(archive_name)
         report(progress_callback, f"[KILLMAILS] exists: {archive_name}", current, total)
         return True
+
+    recent_404 = unavailable_cache_get(archive_name)
+    if recent_404:
+        age_min = int((time.time() - float(recent_404.get("checked_at", 0) or 0)) / 60)
+        ttl_min = int(UNAVAILABLE_TTL_SECONDS / 60)
+        report(progress_callback, f"[KILLMAILS] skipped recent 404 cache: {archive_name} ({age_min}/{ttl_min} min)", current, total)
+        return False
 
     url = archive_url_for_day(day)
     tmp_path = archive_path.with_suffix(archive_path.suffix + ".part")
@@ -114,6 +218,7 @@ def download_archive(day, progress_callback: ProgressCallback | None = None, cur
             return False
 
         tmp_path.replace(archive_path)
+        unavailable_cache_clear(archive_name)
         report(progress_callback, f"[KILLMAILS] downloaded: {archive_name}", current, total)
         return True
 
@@ -121,7 +226,8 @@ def download_archive(day, progress_callback: ProgressCallback | None = None, cur
         tmp_path.unlink(missing_ok=True)
 
         if e.code == 404:
-            report(progress_callback, f"[KILLMAILS] not available yet: {archive_name}", current, total)
+            unavailable_cache_set(archive_name, "404")
+            report(progress_callback, f"[KILLMAILS] not available yet, cached for 4h: {archive_name}", current, total)
             return False
 
         report(progress_callback, f"[KILLMAILS] HTTP error {archive_name}: {e}", current, total)
@@ -133,11 +239,59 @@ def download_archive(day, progress_callback: ProgressCallback | None = None, cur
         return False
 
 
-def init_db() -> sqlite3.Connection:
-    ensure_folders()
+def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        cur = conn.cursor()
+        cur.execute(f"PRAGMA table_info({table_name})")
+        return {str(row[1]) for row in cur.fetchall()}
+    except Exception:
+        return set()
 
-    conn = sqlite3.connect(str(DB_PATH), timeout=30)
+
+def is_old_flat_schema(conn: sqlite3.Connection) -> bool:
+    cols = table_columns(conn, "killmail_attackers")
+    return "killmail_time" in cols or "victim_character_id" in cols or "victim_ship_type_id" in cols
+
+
+def rebuild_schema(conn: sqlite3.Connection, progress_callback: ProgressCallback | None = None):
+    report(progress_callback, "[LOCAL DB] old schema detected, rebuilding compact DB...")
+
     cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS killmail_attackers")
+    cur.execute("DROP TABLE IF EXISTS killmails")
+    cur.execute("DROP TABLE IF EXISTS cyno_losses")
+    cur.execute("DROP TABLE IF EXISTS archive_status")
+    cur.execute("PRAGMA user_version = 0")
+    conn.commit()
+
+    create_schema(conn)
+    conn.commit()
+
+
+def create_schema(conn: sqlite3.Connection):
+    cur = conn.cursor()
+
+    # One row per killmail. Victim/system/time are no longer repeated for every attacker.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS killmails (
+            killmail_id INTEGER PRIMARY KEY,
+            killmail_time TEXT NOT NULL,
+            victim_character_id INTEGER,
+            victim_ship_type_id INTEGER,
+            solar_system_id INTEGER
+        )
+    """)
+
+    # One row per attacker only. Smaller and faster than storing killmail data on every row.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS killmail_attackers (
+            killmail_id INTEGER NOT NULL,
+            attacker_character_id INTEGER NOT NULL,
+            final_blow INTEGER DEFAULT 0,
+            damage_done INTEGER DEFAULT 0,
+            PRIMARY KEY (killmail_id, attacker_character_id)
+        )
+    """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cyno_losses (
@@ -147,20 +301,6 @@ def init_db() -> sqlite3.Connection:
             ship_type_id INTEGER,
             cyno_module_id INTEGER NOT NULL,
             cyno_module_name TEXT NOT NULL
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS killmail_attackers (
-            killmail_id INTEGER NOT NULL,
-            killmail_time TEXT NOT NULL,
-            attacker_character_id INTEGER NOT NULL,
-            victim_character_id INTEGER,
-            victim_ship_type_id INTEGER,
-            solar_system_id INTEGER,
-            final_blow INTEGER DEFAULT 0,
-            damage_done INTEGER DEFAULT 0,
-            PRIMARY KEY (killmail_id, attacker_character_id)
         )
     """)
 
@@ -175,13 +315,18 @@ def init_db() -> sqlite3.Connection:
     """)
 
     cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_attackers_character_time
-        ON killmail_attackers(attacker_character_id, killmail_time DESC)
+        CREATE INDEX IF NOT EXISTS idx_killmails_time
+        ON killmails(killmail_time DESC)
     """)
 
     cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_attackers_victim_time
-        ON killmail_attackers(victim_character_id, killmail_time DESC)
+        CREATE INDEX IF NOT EXISTS idx_killmails_victim_time
+        ON killmails(victim_character_id, killmail_time DESC)
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_attackers_character_killmail
+        ON killmail_attackers(attacker_character_id, killmail_id)
     """)
 
     cur.execute("""
@@ -194,7 +339,25 @@ def init_db() -> sqlite3.Connection:
         ON cyno_losses(last_cyno_time)
     """)
 
-    conn.commit()
+    cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def init_db(progress_callback: ProgressCallback | None = None) -> sqlite3.Connection:
+    ensure_folders()
+
+    conn = sqlite3.connect(str(DB_PATH), timeout=60)
+    cur = conn.cursor()
+
+    cur.execute("PRAGMA user_version")
+    version = int(cur.fetchone()[0] or 0)
+
+    if is_old_flat_schema(conn) or (version and version < SCHEMA_VERSION):
+        rebuild_schema(conn, progress_callback)
+    else:
+        create_schema(conn)
+        cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
+
     return conn
 
 
@@ -227,6 +390,39 @@ def find_victim_cyno_module(killmail: dict[str, Any]):
             return found
 
     return None
+
+
+def save_killmail(conn: sqlite3.Connection, killmail: dict[str, Any]) -> bool:
+    killmail_id = killmail.get("killmail_id")
+    killmail_time = killmail.get("killmail_time")
+    solar_system_id = killmail.get("solar_system_id")
+
+    victim = killmail.get("victim", {}) or {}
+    victim_character_id = victim.get("character_id")
+    victim_ship_type_id = victim.get("ship_type_id")
+
+    if not killmail_id or not killmail_time:
+        return False
+
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO killmails (
+            killmail_id,
+            killmail_time,
+            victim_character_id,
+            victim_ship_type_id,
+            solar_system_id
+        )
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        int(killmail_id),
+        killmail_time,
+        victim_character_id,
+        victim_ship_type_id,
+        solar_system_id,
+    ))
+
+    return True
 
 
 def save_cyno_loss(conn: sqlite3.Connection, killmail: dict[str, Any], module_id: int) -> bool:
@@ -295,14 +491,8 @@ def save_cyno_loss(conn: sqlite3.Connection, killmail: dict[str, Any], module_id
 
 def save_attackers(conn: sqlite3.Connection, killmail: dict[str, Any]) -> int:
     killmail_id = killmail.get("killmail_id")
-    killmail_time = killmail.get("killmail_time")
-    solar_system_id = killmail.get("solar_system_id")
 
-    victim = killmail.get("victim", {}) or {}
-    victim_character_id = victim.get("character_id")
-    victim_ship_type_id = victim.get("ship_type_id")
-
-    if not killmail_id or not killmail_time:
+    if not killmail_id:
         return 0
 
     rows = []
@@ -315,11 +505,7 @@ def save_attackers(conn: sqlite3.Connection, killmail: dict[str, Any]) -> int:
 
         rows.append((
             int(killmail_id),
-            killmail_time,
             int(attacker_character_id),
-            victim_character_id,
-            victim_ship_type_id,
-            solar_system_id,
             1 if attacker.get("final_blow") else 0,
             int(attacker.get("damage_done") or 0),
         ))
@@ -331,15 +517,11 @@ def save_attackers(conn: sqlite3.Connection, killmail: dict[str, Any]) -> int:
     cur.executemany("""
         INSERT OR IGNORE INTO killmail_attackers (
             killmail_id,
-            killmail_time,
             attacker_character_id,
-            victim_character_id,
-            victim_ship_type_id,
-            solar_system_id,
             final_blow,
             damage_done
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?)
     """, rows)
 
     return len(rows)
@@ -395,6 +577,9 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
                 try:
                     killmail = json.load(file_obj)
                 except Exception:
+                    continue
+
+                if not save_killmail(conn, killmail):
                     continue
 
                 json_count += 1
@@ -460,8 +645,17 @@ def cleanup_old_db_rows(conn: sqlite3.Connection, required_names: set[str], days
 
     cur = conn.cursor()
 
-    cur.execute("DELETE FROM killmail_attackers WHERE killmail_time < ?", (cutoff,))
+    # Killmails delete cascades logically by first deleting attacker rows for old killmails.
+    cur.execute("""
+        DELETE FROM killmail_attackers
+        WHERE killmail_id IN (
+            SELECT killmail_id FROM killmails WHERE killmail_time < ?
+        )
+    """, (cutoff,))
     removed_attackers = cur.rowcount if cur.rowcount is not None else 0
+
+    cur.execute("DELETE FROM killmails WHERE killmail_time < ?", (cutoff,))
+    removed_killmails = cur.rowcount if cur.rowcount is not None else 0
 
     cur.execute("DELETE FROM cyno_losses WHERE last_cyno_time < ?", (cutoff,))
     removed_cynos = cur.rowcount if cur.rowcount is not None else 0
@@ -472,79 +666,182 @@ def cleanup_old_db_rows(conn: sqlite3.Connection, required_names: set[str], days
             f"DELETE FROM archive_status WHERE archive_name NOT IN ({placeholders})",
             tuple(sorted(required_names)),
         )
+        removed_archives = cur.rowcount if cur.rowcount is not None else 0
     else:
-        cur.execute("DELETE FROM archive_status")
-
-    removed_status = cur.rowcount if cur.rowcount is not None else 0
+        removed_archives = 0
 
     conn.commit()
 
-    total = int(removed_attackers) + int(removed_cynos) + int(removed_status)
+    total = int(removed_attackers) + int(removed_killmails) + int(removed_cynos) + int(removed_archives)
 
     if total:
         report(
             progress_callback,
             "[LOCAL DB] cleanup: "
-            f"attackers={removed_attackers}, cynos={removed_cynos}, archives={removed_status}",
+            f"killmails={removed_killmails}, attackers={removed_attackers}, "
+            f"cynos={removed_cynos}, archives={removed_archives}",
         )
 
     return total
 
 
-def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: ProgressCallback | None = None) -> dict[str, int]:
-    """Startup updater with progress callback.
+def compact_database(conn: sqlite3.Connection, progress_callback: ProgressCallback | None = None) -> None:
+    try:
+        report(progress_callback, "[LOCAL DB] compacting SQLite database...")
+        cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode=DELETE")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA optimize")
+        conn.commit()
 
-    progress_callback(message, current, total)
-    """
+        cur.execute("VACUUM")
+        conn.commit()
+
+        if DB_PATH.exists():
+            size_mb = DB_PATH.stat().st_size / 1024 / 1024
+            report(progress_callback, f"[LOCAL DB] compacted. size={size_mb:.1f} MB")
+
+    except Exception as e:
+        report(progress_callback, f"[LOCAL DB] compact skipped: {e}")
+
+
+
+def get_processed_archive_names(conn: sqlite3.Connection) -> set[str]:
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT archive_name FROM archive_status")
+        return {str(row[0]) for row in cur.fetchall()}
+    except Exception:
+        return set()
+
+
+def get_unprocessed_archives(conn: sqlite3.Connection, days) -> list[Path]:
+    processed = get_processed_archive_names(conn)
+    result = []
+
+    for day in sorted(days):
+        archive_path = KILLMAILS_DIR / archive_name_for_day(day)
+
+        if archive_path.exists() and archive_path.name not in processed:
+            result.append(archive_path)
+
+    return result
+
+
+def get_missing_days(days) -> list:
+    result = []
+
+    for day in days:
+        archive_path = KILLMAILS_DIR / archive_name_for_day(day)
+
+        if not archive_path.exists() or archive_path.stat().st_size <= 0:
+            result.append(day)
+
+    return result
+
+
+def database_has_recent_window(conn: sqlite3.Connection, required_names: set[str]) -> bool:
+    processed = get_processed_archive_names(conn)
+
+    if not required_names:
+        return False
+
+    return required_names.issubset(processed)
+
+
+def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: ProgressCallback | None = None) -> dict[str, int]:
     ensure_folders()
 
     days = required_days(days_back)
     required_names = {archive_name_for_day(day) for day in days}
+    unavailable_cache_prune(required_names)
 
-    total_steps = len(days) * 2 + 3
-    step = 0
+    report(progress_callback, "[1/4] Checking local SQLite database...", 2, 100)
+    conn = init_db(progress_callback)
 
-    report(progress_callback, "[LOCAL DB] checking killmail archives...", step, total_steps)
-
-    for day in days:
-        step += 1
-        download_archive(day, progress_callback, step, total_steps)
-
-    step += 1
-    report(progress_callback, "[LOCAL DB] opening SQLite database...", step, total_steps)
-    conn = init_db()
-
-    processed = 0
+    processed_archives = 0
 
     try:
-        step += 1
-        report(progress_callback, "[LOCAL DB] cleaning old data...", step, total_steps)
+        missing_days = get_missing_days(days)
+        unprocessed_archives = get_unprocessed_archives(conn, days)
+
+        if not missing_days and not unprocessed_archives and database_has_recent_window(conn, required_names):
+            report(progress_callback, "[4/4] Local intel database is ready. Opening app...", 100, 100)
+            return {
+                "processed": 0,
+                "downloaded": 0,
+                "days": len(days),
+                "total_steps": 1,
+            }
+
+        downloaded = 0
+
+        # Phase 2: downloads use 5-45%
+        download_total = max(1, len(missing_days))
+
+        if missing_days:
+            report(progress_callback, f"[2/4] Downloading missing archives: {len(missing_days)}", 5, 100)
+
+        for index, day in enumerate(missing_days, start=1):
+            archive_name = archive_name_for_day(day)
+            percent = 5 + int((index - 1) / download_total * 40)
+            report(progress_callback, f"[2/4] Downloading {index}/{len(missing_days)}: {archive_name}", percent, 100)
+
+            ok = download_archive(day, progress_callback=None)
+
+            if ok:
+                downloaded += 1
+                status = "Downloaded"
+            else:
+                status = "Skipped / not available yet"
+
+            percent = 5 + int(index / download_total * 40)
+            report(progress_callback, f"[2/4] {status} {index}/{len(missing_days)}", percent, 100)
+
+        # Phase 3: cleanup
+        report(progress_callback, "[3/4] Cleaning old local data...", 48, 100)
         cleanup_old_archives(required_names, progress_callback)
         cleanup_old_db_rows(conn, required_names, days, progress_callback)
 
-        for day in sorted(days):
-            step += 1
-            archive_path = KILLMAILS_DIR / archive_name_for_day(day)
+        # Recalculate after downloads and cleanup.
+        unprocessed_archives = get_unprocessed_archives(conn, days)
+        process_total = max(1, len(unprocessed_archives))
 
-            if not archive_path.exists():
-                report(progress_callback, f"[LOCAL DB] archive missing, skipped: {archive_path.name}", step, total_steps)
-                continue
+        if unprocessed_archives:
+            report(progress_callback, f"[3/4] Adding archives to SQLite: {len(unprocessed_archives)}", 52, 100)
+        else:
+            report(progress_callback, "[3/4] No new archives to add to SQLite.", 80, 100)
 
-            if process_archive(conn, archive_path, progress_callback, step, total_steps):
-                processed += 1
+        # Processing uses 52-88%
+        for index, archive_path in enumerate(unprocessed_archives, start=1):
+            percent = 52 + int((index - 1) / process_total * 36)
+            report(progress_callback, f"[3/4] Adding to SQLite {index}/{len(unprocessed_archives)}: {archive_path.name}", percent, 100)
 
-        step = total_steps
-        report(progress_callback, f"[LOCAL DB] ready. processed={processed}", step, total_steps)
+            if process_archive(conn, archive_path, progress_callback=None):
+                processed_archives += 1
+
+            percent = 52 + int(index / process_total * 36)
+            report(progress_callback, f"[3/4] Added to SQLite {index}/{len(unprocessed_archives)}", percent, 100)
+
+        # Phase 4: compact only if changed. Keep under 100 until really finished.
+        if downloaded or processed_archives:
+            report(progress_callback, "[4/4] Optimizing SQLite database...", 92, 100)
+            compact_database(conn, progress_callback=None)
+
+        report(
+            progress_callback,
+            f"[4/4] Local intel database is ready. downloaded={downloaded}, processed={processed_archives}. Opening app...",
+            100,
+            100,
+        )
 
         return {
-            "processed": processed,
+            "processed": processed_archives,
+            "downloaded": downloaded,
             "days": len(days),
-            "total_steps": total_steps,
+            "total_steps": 100,
         }
 
     finally:
         conn.close()
 
-
-if __name__ == "__main__":
-    ensure_local_intel_ready()

@@ -1,7 +1,8 @@
 import sys
+import os
 import pyperclip
 
-from PySide6.QtCore import Qt, QThreadPool, QTimer
+from PySide6.QtCore import Qt, QThreadPool, QTimer, QPoint
 from PySide6.QtGui import QColor, QCursor, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
     QStackedWidget,
+    QMessageBox,
 )
 
 from parser import parse_pilots
@@ -26,8 +28,10 @@ from intel_table import IntelTable
 from eve_tabs import EveTabs
 from zkill_panel import ZkillPanel
 from options_panel import OptionsPanel
-from user_settings import load_ui_settings, save_ui_settings
+from user_settings import load_ui_settings, save_ui_settings, load_window_settings, save_window_settings
 from windows_blur import enable_eve_blur
+from paths import USER_DATA_DIR
+from health_check import collect_health_info
 
 from row_renderer import (
     set_loading_row as render_loading_row,
@@ -51,8 +55,11 @@ class EveLocalScanner(QWidget):
         self.setMinimumSize(560, 280)
 
         self.resize_margin = 8
+        self._window_drag_active = False
+        self._window_drag_offset = QPoint()
 
         self.user_settings = load_ui_settings()
+        self.window_settings = load_window_settings()
         self.ui_transparency = int(self.user_settings["transparency"])
         self.ui_alpha = self.transparency_to_alpha(self.ui_transparency)
         self.ui_blur = int(self.user_settings["blur"])
@@ -88,12 +95,145 @@ class EveLocalScanner(QWidget):
         self.last_hover_row = None
 
         self.build_ui()
+        self.apply_saved_window_geometry()
 
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
 
         self.start_clipboard_timer()
+
+
+    def _is_window_drag_area(self, widget) -> bool:
+        """Allow dragging from non-interactive empty UI areas.
+
+        This makes the empty area to the right of tabs draggable, while not breaking
+        table clicks, browser clicks, buttons, sliders, inputs, etc.
+        """
+        if widget is None:
+            return False
+
+        if widget in (self.main_panel, self.stack):
+            return True
+
+        # Top/title/tabs areas should drag.
+        current = widget
+        while current is not None:
+            if current in (getattr(self, "title_bar", None), getattr(self, "tabs", None)):
+                return True
+
+            # Never start window drag from these interactive/content areas.
+            if current in (
+                getattr(self, "table", None),
+                getattr(self, "general_page", None),
+                getattr(self, "zkill_panel", None),
+                getattr(self, "options_panel", None),
+            ):
+                return False
+
+            current = current.parentWidget() if hasattr(current, "parentWidget") else None
+
+        return False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            child = self.childAt(event.position().toPoint())
+
+            if self._is_window_drag_area(child):
+                self._window_drag_active = True
+                self._window_drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._window_drag_active and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._window_drag_offset)
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._window_drag_active = False
+        super().mouseReleaseEvent(event)
+
+
+
+    def show_health_check(self):
+        try:
+            text = collect_health_info()
+
+            box = QMessageBox(self)
+            box.setWindowTitle("Health Check")
+            box.setText(text)
+            box.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+            box.setIcon(QMessageBox.Information)
+            box.exec()
+
+        except Exception as e:
+            QMessageBox.warning(self, "Health Check", f"Failed to collect health info:\n{e}")
+
+    def clear_local_data_cache(self):
+        # Keep this conservative: only clear cache files, not DB/killmails/user settings.
+        removed = []
+
+        for name in ("cache.json", "unavailable_archives.json"):
+            path = USER_DATA_DIR / name
+
+            try:
+                if path.exists():
+                    path.unlink()
+                    removed.append(str(path))
+            except Exception as e:
+                QMessageBox.warning(self, "Clear local data/cache", f"Failed to remove:\n{path}\n\n{e}")
+                return
+
+        if removed:
+            QMessageBox.information(
+                self,
+                "Clear local data/cache",
+                "Removed:\n" + "\n".join(removed),
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Clear local data/cache",
+                "No cache files found.",
+            )
+
+    def apply_saved_window_geometry(self):
+        settings = getattr(self, "window_settings", {}) or {}
+
+        width = int(settings.get("width") or 760)
+        height = int(settings.get("height") or 440)
+        x = settings.get("x")
+        y = settings.get("y")
+
+        width = max(self.minimumWidth(), width)
+        height = max(self.minimumHeight(), height)
+
+        if x is None or y is None:
+            self.resize(width, height)
+            return
+
+        try:
+            self.setGeometry(int(x), int(y), width, height)
+        except Exception:
+            self.resize(width, height)
+
+    def save_current_window_geometry(self):
+        geo = self.geometry()
+
+        save_window_settings(
+            {
+                "x": int(geo.x()),
+                "y": int(geo.y()),
+                "width": int(geo.width()),
+                "height": int(geo.height()),
+            }
+        )
 
     def transparency_to_alpha(self, transparency):
         transparency = max(0, min(100, int(transparency)))
@@ -146,6 +286,8 @@ class EveLocalScanner(QWidget):
         self.options_panel.setObjectName("OptionsPage")
         self.options_panel.setAttribute(Qt.WA_StyledBackground, True)
         self.options_panel.settingsChanged.connect(self.apply_ui_settings)
+        self.options_panel.healthCheckRequested.connect(self.show_health_check)
+        self.options_panel.clearDataRequested.connect(self.clear_local_data_cache)
         self.options_panel.set_values(
             self.ui_transparency,
             self.ui_blur,
@@ -203,6 +345,9 @@ class EveLocalScanner(QWidget):
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setShowGrid(False)
+        self.table.setAttribute(Qt.WA_StyledBackground, True)
+        self.table.setAutoFillBackground(False)
+        self.table.viewport().setAutoFillBackground(False)
 
         self.table.rowHovered.connect(self.on_table_row_hovered)
         self.table.mouseLeft.connect(self.on_table_mouse_left)
@@ -284,19 +429,31 @@ class EveLocalScanner(QWidget):
 
         self.table.setStyleSheet(f"""
             QTableWidget {{
-                background-color: rgba({bg.red()}, {bg.green()}, {bg.blue()}, {table_alpha});
+                background: transparent;
+                background-color: transparent;
                 border: none;
                 gridline-color: transparent;
                 color: {self.ui_text_color};
                 font-size: {self.ui_font_size}pt;
                 outline: none;
+                selection-background-color: rgba(70, 100, 130, 110);
+            }}
+
+            QTableWidget::viewport {{
+                background: transparent;
+                background-color: transparent;
             }}
 
             QTableWidget::item {{
-                color: {self.ui_text_color};
-                padding: 1px 2px;
+                background: transparent;
                 border: none;
+                padding: 1px 2px;
+                color: {self.ui_text_color};
                 font-size: {self.ui_font_size}pt;
+            }}
+
+            QTableWidget::item:selected {{
+                background: rgba(70, 100, 130, 110);
             }}
 
             QHeaderView {{
@@ -305,7 +462,8 @@ class EveLocalScanner(QWidget):
             }}
 
             QHeaderView::section {{
-                background-color: rgba({bg.red()}, {bg.green()}, {bg.blue()}, {header_alpha});
+                background: transparent;
+                background-color: transparent;
                 color: {self.ui_text_color};
                 border: none;
                 padding: 2px 2px;
@@ -315,10 +473,10 @@ class EveLocalScanner(QWidget):
         """)
 
         self.tabs.apply_colors(
+            self.ui_bg_color,
             self.ui_frame_color,
             self.ui_text_color,
             self.ui_font_size,
-            self.ui_bg_color,
         )
 
         self.title_bar.title.setStyleSheet(f"""
@@ -349,6 +507,34 @@ class EveLocalScanner(QWidget):
             widget_font = widget.font()
             widget_font.setPointSize(int(font_size))
             widget.setFont(widget_font)
+
+        self.update_table_item_fonts(font_size)
+        self.table.verticalHeader().setDefaultSectionSize(max(18, int(font_size) + 10))
+
+
+    def update_table_item_fonts(self, font_size):
+        font = self.table.font()
+        font.setPointSize(int(font_size))
+
+        self.table.setFont(font)
+        self.table.viewport().setFont(font)
+        self.table.horizontalHeader().setFont(font)
+        self.table.verticalHeader().setFont(font)
+
+        for row in range(self.table.rowCount()):
+            for col in range(self.table.columnCount()):
+                item = self.table.item(row, col)
+
+                if item is not None:
+                    item.setFont(font)
+
+                cell_widget = self.table.cellWidget(row, col)
+                if cell_widget is not None:
+                    cell_widget.setFont(font)
+
+        self.table.resizeRowsToContents()
+        self.table.viewport().update()
+        self.table.horizontalHeader().update()
 
     def bg_rgb(self):
         color = QColor(self.ui_bg_color)
@@ -404,6 +590,7 @@ class EveLocalScanner(QWidget):
                     item.setForeground(color)
 
         self.table.viewport().update()
+
 
     def switch_tab(self, name):
         if name == "General":
@@ -695,6 +882,7 @@ class EveLocalScanner(QWidget):
             return
 
     def closeEvent(self, event):
+        self.save_current_window_geometry()
         self.thread_pool.clear()
         self.cyno_pool.clear()
         self.relations_pool.clear()

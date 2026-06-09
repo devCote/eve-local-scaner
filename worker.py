@@ -1,3 +1,4 @@
+import re
 from PySide6.QtCore import QObject, Signal, QRunnable
 
 from ship_names import get_ship_name
@@ -60,8 +61,102 @@ def get_top_ship_ids_from_stats(stats: dict, limit: int = 3) -> list[int]:
 
 
 def is_ignored_last_ship_name(name: str) -> bool:
-    lowered = (name or "").lower()
-    return "capsule" in lowered or "shuttle" in lowered
+    """Skip non-useful losses in Last Ships.
+
+    Last Ships should show real pilot ships only, not capsules, shuttles,
+    rookie ships, structures, deployables, tractor units, drones/fighters,
+    containers, wrecks, or unresolved EVERef fallback names like "Type 3".
+    """
+    raw = str(name or "").strip()
+    lowered = raw.lower()
+
+    if not lowered or lowered in {"?", "unknown", "none", "-"}:
+        return True
+
+    # EVERef fallback names for unresolved type IDs.
+    # Examples: Type 3, Type 4, Type 12345
+    if re.fullmatch(r"type\s*\d+", lowered):
+        return True
+
+    ignored_exact = {
+        "capsule",
+        "capsule - genolution auroral 197-variant",
+
+        # rookie starter ships
+        "ibis",
+        "velator",
+        "reaper",
+        "impairor",
+    }
+
+    if lowered in ignored_exact:
+        return True
+
+    ignored_parts = [
+        "capsule",
+        "shuttle",
+
+        # rookie starter ships
+        "ibis",
+        "velator",
+        "reaper",
+        "impairor",
+
+        # structures / citadels / Upwell
+        "citadel",
+        "engineering complex",
+        "refinery",
+        "upwell",
+        "structure",
+        "customs office",
+        "player owned customs office",
+        "control tower",
+        "moon mining",
+        "drilling platform",
+        "jump bridge",
+        "cyno beacon",
+        "cynosural beacon",
+        "cynosural system jammer",
+        "ansiblex",
+        "pharolux",
+        "tenebrex",
+        "astrahus",
+        "fortizar",
+        "keepstar",
+        "raitaru",
+        "azbel",
+        "sotiyo",
+        "athanor",
+        "tatara",
+
+        # deployables / tractors / bubbles
+        "mobile tractor",
+        "tractor unit",
+        "mobile depot",
+        "mobile cynosural",
+        "mobile scan inhibitor",
+        "mobile micro jump",
+        "mobile observatory",
+        "mobile siphon",
+        "warp disruption probe",
+        "mobile warp disruptor",
+        "warp disruptor probe",
+        "bubble",
+        "deployable",
+
+        # cans / wrecks / drones / misc objects
+        "cargo container",
+        "secure container",
+        "audit log secure container",
+        "freight container",
+        "wreck",
+        "drone",
+        "fighter",
+        "sentry gun",
+        "billboard",
+    ]
+
+    return any(part in lowered for part in ignored_parts)
 
 
 def build_last_lost_ships(character_id: int, limit: int = 3) -> list[dict]:
@@ -70,7 +165,7 @@ def build_last_lost_ships(character_id: int, limit: int = 3) -> list[dict]:
     Capsule and Shuttle losses are skipped, so the column shows real ships.
     """
     # Fetch more than 3 because the latest losses may be Capsule/Shuttle.
-    losses = get_last_lost_ships(character_id, limit=max(20, limit * 8))
+    losses = get_last_lost_ships(character_id, limit=max(80, limit * 25))
 
     result = []
 

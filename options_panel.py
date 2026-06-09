@@ -18,6 +18,8 @@ from user_settings import DEFAULT_UI_SETTINGS
 class OptionsPanel(QWidget):
     # transparency, blur, font_size, frame_color, text_color, bg_color
     settingsChanged = Signal(int, int, int, str, str, str)
+    clearDataRequested = Signal()
+    healthCheckRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,11 +37,7 @@ class OptionsPanel(QWidget):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(10)
 
-        self.title = QLabel("UI Options")
-        self.title.setObjectName("OptionsTitle")
-        layout.addWidget(self.title)
-
-        layout.addWidget(self.make_line())
+        # Title removed to save vertical space.
 
         self.transparency_label = QLabel()
         self.transparency_slider = QSlider(Qt.Horizontal)
@@ -63,15 +61,25 @@ class OptionsPanel(QWidget):
         color_row.setContentsMargins(0, 0, 0, 0)
         color_row.setSpacing(8)
 
+        maintenance_row = QHBoxLayout()
+        maintenance_row.setContentsMargins(0, 0, 0, 0)
+        maintenance_row.setSpacing(8)
+
         self.default_button = QPushButton("Default")
         self.frame_button = QPushButton("Frame color")
         self.text_button = QPushButton("Text color")
         self.bg_button = QPushButton("Background color")
 
+        self.clear_data_button = QPushButton("Clear local data/cache")
+        self.health_button = QPushButton("Health Check")
+
         self.default_button.clicked.connect(self.reset_defaults)
         self.frame_button.clicked.connect(self.pick_frame_color)
         self.text_button.clicked.connect(self.pick_text_color)
         self.bg_button.clicked.connect(self.pick_bg_color)
+
+        self.clear_data_button.clicked.connect(self.clearDataRequested.emit)
+        self.health_button.clicked.connect(self.healthCheckRequested.emit)
 
         color_row.addWidget(self.default_button)
         color_row.addWidget(self.frame_button)
@@ -79,6 +87,11 @@ class OptionsPanel(QWidget):
         color_row.addWidget(self.bg_button)
         color_row.addStretch()
         layout.addLayout(color_row)
+
+        maintenance_row.addWidget(self.clear_data_button)
+        maintenance_row.addWidget(self.health_button)
+        maintenance_row.addStretch()
+        layout.addLayout(maintenance_row)
 
         self.blur_check = QCheckBox("Blur")
         self.blur_check.setChecked(bool(self.blur))
@@ -112,12 +125,6 @@ class OptionsPanel(QWidget):
                 color: {self.text_color};
                 background: transparent;
                 font-size: {self.font_size}pt;
-            }}
-
-            QLabel#OptionsTitle {{
-                color: #A9F5E0;
-                font-size: {self.font_size + 1}pt;
-                font-weight: bold;
             }}
 
             QPushButton {{
