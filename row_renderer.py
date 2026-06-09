@@ -40,7 +40,9 @@ class CenteredPixmapWidget(QWidget):
         )
 
         x = (self.width() - scaled.width()) // 2
-        y = (self.height() - scaled.height()) // 2
+        y = (self.height() - scaled.height()) // 2 + 1
+
+        y = max(0, y)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)

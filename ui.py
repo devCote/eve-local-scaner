@@ -195,6 +195,8 @@ class EveLocalScanner(QWidget):
         self.table.setAlternatingRowColors(False)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setHighlightSections(False)
+        self.table.horizontalHeader().setMinimumSectionSize(6)
+        self.table.horizontalHeader().setDefaultSectionSize(24)
 
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -209,10 +211,10 @@ class EveLocalScanner(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
 
-        self.table.setColumnWidth(0, 12)
-        self.table.setColumnWidth(1, 12)
+        self.table.setColumnWidth(0, 18)
+        self.table.setColumnWidth(1, 14)
 
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeToContents
         )
@@ -292,7 +294,7 @@ class EveLocalScanner(QWidget):
 
             QTableWidget::item {{
                 color: {self.ui_text_color};
-                padding: 1px 3px;
+                padding: 1px 2px;
                 border: none;
                 font-size: {self.ui_font_size}pt;
             }}
@@ -306,7 +308,7 @@ class EveLocalScanner(QWidget):
                 background-color: rgba({bg.red()}, {bg.green()}, {bg.blue()}, {header_alpha});
                 color: {self.ui_text_color};
                 border: none;
-                padding: 2px 3px;
+                padding: 2px 2px;
                 font-size: {self.ui_font_size}pt;
                 font-weight: normal;
             }}
