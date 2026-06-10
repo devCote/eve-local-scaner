@@ -25,6 +25,16 @@ def init_db() -> sqlite3.Connection:
     cur = conn.cursor()
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS killmails (
+            killmail_id INTEGER PRIMARY KEY,
+            killmail_time TEXT NOT NULL,
+            victim_character_id INTEGER,
+            victim_ship_type_id INTEGER,
+            solar_system_id INTEGER
+        )
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS cyno_losses (
             character_id INTEGER PRIMARY KEY,
             last_cyno_time TEXT NOT NULL,
@@ -38,11 +48,7 @@ def init_db() -> sqlite3.Connection:
     cur.execute("""
         CREATE TABLE IF NOT EXISTS killmail_attackers (
             killmail_id INTEGER NOT NULL,
-            killmail_time TEXT NOT NULL,
             attacker_character_id INTEGER NOT NULL,
-            victim_character_id INTEGER,
-            victim_ship_type_id INTEGER,
-            solar_system_id INTEGER,
             final_blow INTEGER DEFAULT 0,
             damage_done INTEGER DEFAULT 0,
             PRIMARY KEY (killmail_id, attacker_character_id)
@@ -60,8 +66,18 @@ def init_db() -> sqlite3.Connection:
     """)
 
     cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_attackers_character_time
-        ON killmail_attackers(attacker_character_id, killmail_time DESC)
+        CREATE INDEX IF NOT EXISTS idx_killmails_time
+        ON killmails(killmail_time DESC)
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_killmails_victim_time
+        ON killmails(victim_character_id, killmail_time DESC)
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_attackers_character_killmail
+        ON killmail_attackers(attacker_character_id, killmail_id)
     """)
 
     cur.execute("""
@@ -120,7 +136,7 @@ def save_cyno_loss(conn, killmail: dict, module_id: int):
     killmail_id = killmail.get("killmail_id")
     killmail_time = killmail.get("killmail_time")
     ship_type_id = victim.get("ship_type_id")
-    module_name = CYNO_MODULES[module_id]
+    module_name = CYNO_MODULES.get(module_id, str(module_id))
 
     if not killmail_id or not killmail_time:
         return False
@@ -174,16 +190,43 @@ def save_cyno_loss(conn, killmail: dict, module_id: int):
     return True
 
 
-def save_attackers(conn, killmail: dict) -> int:
+def save_killmail(conn, killmail: dict) -> bool:
     killmail_id = killmail.get("killmail_id")
     killmail_time = killmail.get("killmail_time")
     solar_system_id = killmail.get("solar_system_id")
 
-    victim = killmail.get("victim", {})
+    victim = killmail.get("victim", {}) or {}
     victim_character_id = victim.get("character_id")
     victim_ship_type_id = victim.get("ship_type_id")
 
     if not killmail_id or not killmail_time:
+        return False
+
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO killmails (
+            killmail_id,
+            killmail_time,
+            victim_character_id,
+            victim_ship_type_id,
+            solar_system_id
+        )
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        int(killmail_id),
+        killmail_time,
+        victim_character_id,
+        victim_ship_type_id,
+        solar_system_id,
+    ))
+
+    return True
+
+
+def save_attackers(conn, killmail: dict) -> int:
+    killmail_id = killmail.get("killmail_id")
+
+    if not killmail_id:
         return 0
 
     rows = []
@@ -196,11 +239,7 @@ def save_attackers(conn, killmail: dict) -> int:
 
         rows.append((
             killmail_id,
-            killmail_time,
             attacker_character_id,
-            victim_character_id,
-            victim_ship_type_id,
-            solar_system_id,
             1 if attacker.get("final_blow") else 0,
             attacker.get("damage_done", 0),
         ))
@@ -212,15 +251,11 @@ def save_attackers(conn, killmail: dict) -> int:
     cur.executemany("""
         INSERT OR IGNORE INTO killmail_attackers (
             killmail_id,
-            killmail_time,
             attacker_character_id,
-            victim_character_id,
-            victim_ship_type_id,
-            solar_system_id,
             final_blow,
             damage_done
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?)
     """, rows)
 
     return len(rows)
@@ -274,6 +309,7 @@ def process_archive(conn, archive_path: Path):
 
                 json_count += 1
 
+                save_killmail(conn, killmail)
                 attacker_rows += save_attackers(conn, killmail)
 
                 module_id = find_victim_cyno_module(killmail)

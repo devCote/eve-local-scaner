@@ -346,19 +346,24 @@ def init_db(progress_callback: ProgressCallback | None = None) -> sqlite3.Connec
     ensure_folders()
 
     conn = sqlite3.connect(str(DB_PATH), timeout=60)
-    cur = conn.cursor()
+    
+    try:
+        cur = conn.cursor()
 
-    cur.execute("PRAGMA user_version")
-    version = int(cur.fetchone()[0] or 0)
+        cur.execute("PRAGMA user_version")
+        version = int(cur.fetchone()[0] or 0)
 
-    if is_old_flat_schema(conn) or (version and version < SCHEMA_VERSION):
-        rebuild_schema(conn, progress_callback)
-    else:
-        create_schema(conn)
-        cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.commit()
+        if is_old_flat_schema(conn) or (version and version < SCHEMA_VERSION):
+            rebuild_schema(conn, progress_callback)
+        else:
+            create_schema(conn)
+            cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.commit()
 
-    return conn
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def archive_already_processed(conn: sqlite3.Connection, archive_name: str) -> bool:
@@ -373,7 +378,13 @@ def find_cyno_module_in_item(item: dict[str, Any]):
     if item_type_id in CYNO_MODULES:
         return item_type_id
 
-    for child in item.get("items", []) or []:
+    children = item.get("items", []) or []
+    if not isinstance(children, list):
+        return None
+    
+    for child in children:
+        if not isinstance(child, dict):
+            continue
         found = find_cyno_module_in_item(child)
         if found:
             return found
@@ -607,6 +618,19 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
         )
 
         conn.commit()
+        
+        # Delete archive file after successful processing to free disk space
+        try:
+            archive_path.unlink()
+            report(
+                progress_callback,
+                f"[LOCAL DB] archived and deleted: {archive_path.name}",
+                current,
+                total,
+            )
+        except Exception as e:
+            report(progress_callback, f"[LOCAL DB] delete archive error {archive_path.name}: {e}", current, total)
+        
         report(
             progress_callback,
             f"[LOCAL DB] ok: {archive_path.name} json={json_count} attackers={attacker_rows} cynos={cyno_count}",
@@ -729,15 +753,59 @@ def get_unprocessed_archives(conn: sqlite3.Connection, days) -> list[Path]:
 
 
 def get_missing_days(days) -> list:
+    """Find days that need to be downloaded.
+    
+    A day is considered "missing" if:
+    - Archive file doesn't exist on disk AND
+    - Archive hasn't been processed (not in archive_status table)
+    
+    This way if archive was downloaded and processed, we don't re-download
+    even if the .tar.bz2 file was deleted to save disk space.
+    """
     result = []
 
     for day in days:
         archive_path = KILLMAILS_DIR / archive_name_for_day(day)
 
-        if not archive_path.exists() or archive_path.stat().st_size <= 0:
-            result.append(day)
+        # If file exists, no need to download
+        if archive_path.exists() and archive_path.stat().st_size > 0:
+            continue
+        
+        # If file doesn't exist but was already processed, skip download
+        # (it means we deleted it after processing - intentional)
+        archive_name = archive_name_for_day(day)
+        if archive_was_processed(archive_name):
+            continue
+        
+        # File missing AND not processed before = need to download
+        result.append(day)
 
     return result
+
+
+def archive_was_processed(archive_name: str) -> bool:
+    """Check if an archive was already processed and added to DB.
+    
+    This is recorded in archive_status table when process_archive() succeeds.
+    Used to avoid re-downloading archives that we intentionally deleted
+    after processing them to save disk space.
+    """
+    db_path = get_db_path()
+    if not db_path.exists():
+        return False
+    
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM archive_status WHERE archive_name = ? LIMIT 1",
+            (archive_name,),
+        )
+        result = cur.fetchone() is not None
+        conn.close()
+        return result
+    except Exception:
+        return False
 
 
 def database_has_recent_window(conn: sqlite3.Connection, required_names: set[str]) -> bool:

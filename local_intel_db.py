@@ -9,6 +9,7 @@ from paths import EXE_DIR, SOURCE_DIR, user_data_path
 
 
 DB_RELATIVE_PATH = Path("data") / "local_intel.sqlite"
+_db_connection: sqlite3.Connection | None = None
 
 
 def get_db_path() -> Path:
@@ -35,15 +36,20 @@ def db_exists() -> bool:
 
 
 def connect() -> sqlite3.Connection | None:
+    global _db_connection
+    
+    if _db_connection is not None:
+        return _db_connection
+    
     db_path = get_db_path()
 
     if not db_path.exists():
         print(f"[LOCAL DB] Not found: {db_path}")
         return None
 
-    conn = sqlite3.connect(str(db_path), timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
+    _db_connection = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
+    _db_connection.row_factory = sqlite3.Row
+    return _db_connection
 
 
 def _fetchone(query: str, params: tuple[Any, ...] = ()) -> sqlite3.Row | None:
@@ -51,12 +57,9 @@ def _fetchone(query: str, params: tuple[Any, ...] = ()) -> sqlite3.Row | None:
     if conn is None:
         return None
 
-    try:
-        cur = conn.cursor()
-        cur.execute(query, params)
-        return cur.fetchone()
-    finally:
-        conn.close()
+    cur = conn.cursor()
+    cur.execute(query, params)
+    return cur.fetchone()
 
 
 def _fetchall(query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
@@ -64,12 +67,9 @@ def _fetchall(query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
     if conn is None:
         return []
 
-    try:
-        cur = conn.cursor()
-        cur.execute(query, params)
-        return cur.fetchall()
-    finally:
-        conn.close()
+    cur = conn.cursor()
+    cur.execute(query, params)
+    return cur.fetchall()
 
 
 def table_exists(table_name: str) -> bool:
