@@ -790,20 +790,18 @@ def archive_was_processed(archive_name: str) -> bool:
     Used to avoid re-downloading archives that we intentionally deleted
     after processing them to save disk space.
     """
-    db_path = get_db_path()
+    db_path = DB_PATH
     if not db_path.exists():
         return False
-    
+
     try:
-        conn = sqlite3.connect(str(db_path), timeout=10)
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM archive_status WHERE archive_name = ? LIMIT 1",
-            (archive_name,),
-        )
-        result = cur.fetchone() is not None
-        conn.close()
-        return result
+        with sqlite3.connect(str(db_path), timeout=10) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM archive_status WHERE archive_name = ? LIMIT 1",
+                (archive_name,),
+            )
+            return cur.fetchone() is not None
     except Exception:
         return False
 
