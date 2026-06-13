@@ -3,20 +3,22 @@ import sys
 import traceback
 import sqlite3
 
-# IMPORTANT: QtWebEngine/Chromium flags must be set before QApplication
-# and before any QWebEngineView/QWebEnginePage is created/imported.
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-    "--disable-gpu "
-    "--disable-gpu-compositing "
-    "--disable-gpu-rasterization "
-    "--disable-accelerated-2d-canvas "
-    "--disable-accelerated-video-decode "
-    "--disable-dev-shm-usage "
-    "--use-angle=swiftshader "
-    "--no-sandbox"
-)
-
-os.environ["QT_OPENGL"] = "software"
+# QtWebEngine browser was removed from the zKill panel.
+# Do not force software OpenGL/SwiftShader globally: it can make normal Qt widgets
+# and table repainting feel slower. Keep the old flags only for emergency testing:
+# set ELS_ENABLE_QTWEBENGINE_FLAGS=1 before starting the app.
+if os.environ.get("ELS_ENABLE_QTWEBENGINE_FLAGS") == "1":
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+        "--disable-gpu "
+        "--disable-gpu-compositing "
+        "--disable-gpu-rasterization "
+        "--disable-accelerated-2d-canvas "
+        "--disable-accelerated-video-decode "
+        "--disable-dev-shm-usage "
+        "--use-angle=swiftshader "
+        "--no-sandbox"
+    )
+    os.environ["QT_OPENGL"] = "software"
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QLockFile
 from PySide6.QtGui import QIcon
@@ -51,7 +53,7 @@ def set_windows_app_id():
 
 
 def get_app_icon() -> QIcon:
-    for name in ("app.ico", "app.png"):
+    for name in ("app.ico", "app.svg", "app.png"):
         icon = QIcon(icon_path(name))
         if not icon.isNull():
             return icon

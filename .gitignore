@@ -18,6 +18,9 @@ logs/installer_output/
 build/
 dist/
 *.spec.bak
+*.txt
+*.log
+*.md
 installer_output/
 build/
 dist/

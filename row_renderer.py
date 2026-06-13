@@ -1,18 +1,33 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPixmap, QPainter
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QTableWidgetItem, QWidget
 
 from worker import CynoWorker
 from paths import icon_path
 
 
-CYNO_ICON_PATH = icon_path("cyno.png")
-BEAR_ICON_PATH = icon_path("bear.png")
-SKULL_ICON_PATH = icon_path("skull.png")
+CYNO_ICON_PATH = icon_path("cyno.svg")
+BEAR_ICON_PATH = icon_path("bear.svg")
+SKULL_ICON_PATH = icon_path("skull.svg")
 
-ICON_SIZE = 12
+ICON_SIZE = 13
+
+
+def resolve_icon_file(filename: str) -> str:
+    """Prefer the new SVG icons, but keep PNG fallback for older folders."""
+    requested = Path(icon_path(filename))
+    if requested.exists():
+        return str(requested)
+
+    if requested.suffix.lower() == ".svg":
+        fallback = Path(icon_path(requested.with_suffix(".png").name))
+        if fallback.exists():
+            return str(fallback)
+
+    return str(requested)
 
 
 class CenteredPixmapWidget(QWidget):
@@ -21,31 +36,52 @@ class CenteredPixmapWidget(QWidget):
 
         self.icon_path = icon_path
         self.icon_size = icon_size
-        self.pixmap = QPixmap(icon_path)
+        self.svg_renderer = None
+        self.pixmap = QPixmap()
+
+        if str(icon_path).lower().endswith(".svg"):
+            renderer = QSvgRenderer(str(icon_path), self)
+            if renderer.isValid():
+                self.svg_renderer = renderer
+        else:
+            self.pixmap = QPixmap(icon_path)
 
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setStyleSheet("background-color: transparent;")
 
+    def _target_rect(self):
+        # Keep icons visually aligned with one-line text. The size follows the
+        # row height, but is capped so SVGs do not look oversized near text.
+        side = min(self.icon_size, max(10, int(self.height() * 0.68)))
+        x = (self.width() - side) / 2
+        y = (self.height() - side) / 2
+        return QRectF(x, y, side, side)
+
     def paintEvent(self, event):
         super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+        target = self._target_rect()
+
+        if self.svg_renderer is not None:
+            self.svg_renderer.render(painter, target)
+            return
 
         if self.pixmap.isNull():
             return
 
         scaled = self.pixmap.scaled(
-            self.icon_size,
-            self.icon_size,
+            int(target.width()),
+            int(target.height()),
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
 
-        x = (self.width() - scaled.width()) // 2
-        y = (self.height() - scaled.height()) // 2 + 1
-
-        y = max(0, y)
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        x = int((self.width() - scaled.width()) / 2)
+        y = int((self.height() - scaled.height()) / 2)
         painter.drawPixmap(x, y, scaled)
 
 
@@ -104,6 +140,8 @@ def set_icon_cell(window, row, col, icon_path_value, icon_size=ICON_SIZE):
     if not icon_path_value:
         return
 
+    icon_path_value = resolve_icon_file(Path(icon_path_value).name)
+
     if not Path(icon_path_value).exists():
         print("Icon not found:", icon_path_value)
         return
@@ -160,6 +198,9 @@ def set_loading_row(window, row, pilot):
     window.table.setCellWidget(row, 0, None)
     window.table.setCellWidget(row, 1, None)
 
+    if hasattr(window, "update_table_row_metrics"):
+        window.update_table_row_metrics()
+
 
 def render_pilot_row(window, row, result):
     danger_value = safe_int(result.get("danger", 0))
@@ -213,6 +254,9 @@ def render_pilot_row(window, row, result):
 
     if character_id:
         start_cyno_worker(window, row, character_id)
+
+    if hasattr(window, "update_table_row_metrics"):
+        window.update_table_row_metrics()
 
     window.pending_pilots -= 1
 

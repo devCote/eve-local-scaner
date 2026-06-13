@@ -112,19 +112,23 @@ class TitleBar(QWidget):
         self.parent_window = parent
 
         self.setObjectName("TitleBar")
-        self.setFixedHeight(22)
+        self.setFixedHeight(24)
 
         self.frame_color = "#3D424A"
         self.text_color = "#D6D8DC"
         self.font_size = 8
         self.title_alpha = 248
         self.tint_color = "#7CFFF0"
+        self.tabs_widget = None
 
-        layout = QHBoxLayout()
-        layout.setContentsMargins(5, 1, 5, 1)
-        layout.setSpacing(2)
+        self.layout = QHBoxLayout()
+        self.layout.setContentsMargins(5, 1, 5, 1)
+        self.layout.setSpacing(0)
 
-        self.title = QLabel("Overview (Local Intel)")
+        # The old text title took vertical space and duplicated the tabs.
+        # Keep the QLabel only for compatibility, but do not show it.
+        self.title = QLabel("")
+        self.title.hide()
         self.title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self.top_button = TitleIconButton("pin", self)
@@ -137,14 +141,25 @@ class TitleBar(QWidget):
         self.minimize_button.clicked.connect(self.parent_window.showMinimized)
         self.close_button.clicked.connect(self.parent_window.close)
 
-        layout.addWidget(self.title)
-        layout.addStretch()
-        layout.addWidget(self.top_button)
-        layout.addWidget(self.minimize_button)
-        layout.addWidget(self.close_button)
+        self.layout.addStretch()
+        self.layout.addWidget(self.top_button)
+        self.layout.addWidget(self.minimize_button)
+        self.layout.addWidget(self.close_button)
 
-        self.setLayout(layout)
+        self.setLayout(self.layout)
         self.apply_style(self.frame_color, self.text_color, self.font_size, self.title_alpha)
+
+    def set_tabs_widget(self, tabs_widget):
+        """Put General/Zkill/Options into the title bar instead of a second row."""
+        if self.tabs_widget is not None:
+            self.tabs_widget.setParent(None)
+
+        self.tabs_widget = tabs_widget
+        self.tabs_widget.setParent(self)
+        self.tabs_widget.setFixedHeight(22)
+
+        # Insert before the stretch, so window buttons stay at the right side.
+        self.layout.insertWidget(0, self.tabs_widget, 0, Qt.AlignLeft | Qt.AlignVCenter)
 
     def apply_style(self, frame_color="#3D424A", text_color="#D6D8DC", font_size=8, title_alpha=248):
         self.frame_color = frame_color
@@ -164,7 +179,7 @@ class TitleBar(QWidget):
         for button in (self.top_button, self.minimize_button, self.close_button):
             button.set_colors(frame_color, text_color, self.tint_color)
 
-        # No square borders around titlebar icons. Only the main titlebar surface remains.
+        # No text title here; tabs live inside this bar.
         self.setStyleSheet(f"""
             QWidget#TitleBar {{
                 background-color: rgba(12, 13, 15, {int(title_alpha)});
@@ -178,6 +193,14 @@ class TitleBar(QWidget):
             child = self.childAt(event.position().toPoint())
             if isinstance(child, QPushButton):
                 return super().mousePressEvent(event)
+
+            # Do not hijack clicks from the embedded tab widget.
+            if self.tabs_widget is not None:
+                current = child
+                while current is not None:
+                    if current is self.tabs_widget:
+                        return super().mousePressEvent(event)
+                    current = current.parentWidget() if hasattr(current, "parentWidget") else None
 
             window = self.parent_window.windowHandle()
             if window:

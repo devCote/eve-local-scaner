@@ -23,6 +23,31 @@ DEFAULT_WINDOW_SETTINGS: dict[str, Any] = {
     "height": 440,
 }
 
+DEFAULT_GENERAL_TABLE_SETTINGS: dict[str, Any] = {
+    "column_widths": {
+        "2": 120,
+        "3": 64,
+        "4": 54,
+        "5": 86,
+        "6": 190,
+    },
+    "visible_columns": {
+        "3": True,   # Danger
+        "4": True,   # Gang
+        "5": True,   # Corp/Ally
+        "6": True,   # Last Ships
+    },
+}
+
+DEFAULT_ZKILL_TABLE_SETTINGS: dict[str, Any] = {
+    "column_widths": {
+        "0": 88,
+        "1": 92,
+        "2": 70,
+        "3": 160,
+    }
+}
+
 
 def get_user_settings_path() -> Path:
     return user_data_path("user.json")
@@ -98,8 +123,8 @@ def normalize_ui_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
         "font_size": clamp_int(
             raw.get("font_size", defaults["font_size"]),
             defaults["font_size"],
-            7,
-            16,
+            8,
+            14,
         ),
         "frame_color": normalize_color(
             raw.get("frame_color", defaults["frame_color"]),
@@ -137,10 +162,76 @@ def normalize_window_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "x": x,
         "y": y,
-        "width": clamp_int(raw.get("width", defaults["width"]), defaults["width"], 560, 4000),
-        "height": clamp_int(raw.get("height", defaults["height"]), defaults["height"], 280, 3000),
+        "width": clamp_int(raw.get("width", defaults["width"]), defaults["width"], 250, 4000),
+        "height": clamp_int(raw.get("height", defaults["height"]), defaults["height"], 200, 3000),
     }
 
+
+
+
+def normalize_general_table_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
+    raw = raw or {}
+    default_widths = DEFAULT_GENERAL_TABLE_SETTINGS["column_widths"]
+    default_visible = DEFAULT_GENERAL_TABLE_SETTINGS["visible_columns"]
+    raw_widths = raw.get("column_widths") if isinstance(raw.get("column_widths"), dict) else {}
+    raw_visible = raw.get("visible_columns") if isinstance(raw.get("visible_columns"), dict) else {}
+
+    widths: dict[str, int] = {}
+
+    for col, default in default_widths.items():
+        # Small columns are allowed, but not zero. Qt will also respect the
+        # header minimum section size from the table setup.
+        widths[col] = clamp_int(raw_widths.get(col, default), default, 6, 1200)
+
+    visible_columns: dict[str, bool] = {}
+    for col, default in default_visible.items():
+        visible_columns[col] = bool(raw_visible.get(col, default))
+
+    return {
+        "column_widths": widths,
+        "visible_columns": visible_columns,
+    }
+
+
+def load_general_table_settings() -> dict[str, Any]:
+    data = load_user_json()
+    raw = data.get("general_table") if isinstance(data, dict) else None
+    settings = normalize_general_table_settings(raw if isinstance(raw, dict) else None)
+    print(f"[USER SETTINGS] loaded general table: {get_user_settings_path()} {settings}")
+    return settings
+
+
+def save_general_table_settings(settings: dict[str, Any]) -> None:
+    data = load_user_json()
+    data["general_table"] = normalize_general_table_settings(settings)
+    save_user_json(data)
+
+
+def normalize_zkill_table_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
+    raw = raw or {}
+    default_widths = DEFAULT_ZKILL_TABLE_SETTINGS["column_widths"]
+    raw_widths = raw.get("column_widths") if isinstance(raw.get("column_widths"), dict) else {}
+
+    widths: dict[str, int] = {}
+
+    for col, default in default_widths.items():
+        widths[col] = clamp_int(raw_widths.get(col, default), default, 26, 1400)
+
+    return {"column_widths": widths}
+
+
+def load_zkill_table_settings() -> dict[str, Any]:
+    data = load_user_json()
+    raw = data.get("zkill_table") if isinstance(data, dict) else None
+    settings = normalize_zkill_table_settings(raw if isinstance(raw, dict) else None)
+    print(f"[USER SETTINGS] loaded zkill table: {get_user_settings_path()} {settings}")
+    return settings
+
+
+def save_zkill_table_settings(settings: dict[str, Any]) -> None:
+    data = load_user_json()
+    data["zkill_table"] = normalize_zkill_table_settings(settings)
+    save_user_json(data)
 
 def load_ui_settings() -> dict[str, Any]:
     data = load_user_json()

@@ -17,6 +17,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QStackedWidget,
     QMessageBox,
+    QDialog,
+    QDialogButtonBox,
+    QCheckBox,
 )
 
 from parser import parse_pilots
@@ -24,11 +27,18 @@ from worker import PilotWorker
 from spinner import SpinnerManager
 from relations import RelationWorker
 from title_bar import TitleBar
-from intel_table import IntelTable
+from intel_table import IntelTable, GeneralHeaderView
 from eve_tabs import EveTabs
 from zkill_panel import ZkillPanel
 from options_panel import OptionsPanel
-from user_settings import load_ui_settings, save_ui_settings, load_window_settings, save_window_settings
+from user_settings import (
+    load_ui_settings,
+    save_ui_settings,
+    load_window_settings,
+    save_window_settings,
+    load_general_table_settings,
+    save_general_table_settings,
+)
 from windows_blur import enable_eve_blur
 from paths import USER_DATA_DIR
 from health_check import collect_health_info
@@ -52,7 +62,7 @@ class EveLocalScanner(QWidget):
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setMinimumSize(560, 280)
+        self.setMinimumSize(250, 200)
 
         self.resize_margin = 8
         self._window_drag_active = False
@@ -60,6 +70,12 @@ class EveLocalScanner(QWidget):
 
         self.user_settings = load_ui_settings()
         self.window_settings = load_window_settings()
+        self.general_table_settings = load_general_table_settings()
+        self._loading_window_geometry = False
+        self._geometry_save_timer = QTimer(self)
+        self._geometry_save_timer.setSingleShot(True)
+        self._geometry_save_timer.timeout.connect(self.save_current_window_geometry)
+        self._loading_general_column_widths = False
         self.ui_transparency = int(self.user_settings["transparency"])
         self.ui_alpha = self.transparency_to_alpha(self.ui_transparency)
         self.ui_blur = int(self.user_settings["blur"])
@@ -95,7 +111,11 @@ class EveLocalScanner(QWidget):
         self.last_hover_row = None
 
         self.build_ui()
+        self._loading_window_geometry = True
         self.apply_saved_window_geometry()
+        if hasattr(self, "tabs") and hasattr(self.tabs, "update_compact_labels_for_width"):
+            self.tabs.update_compact_labels_for_width(self.width(), force=True)
+        self._loading_window_geometry = False
 
         app = QApplication.instance()
         if app:
@@ -176,6 +196,17 @@ class EveLocalScanner(QWidget):
             QMessageBox.warning(self, "Health Check", f"Failed to collect health info:\n{e}")
 
     def clear_local_data_cache(self):
+        reply = QMessageBox.question(
+            self,
+            "Clear local data/cache",
+            "Are you sure you want to delete local data/cache?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
         # Keep this conservative: only clear cache files, not DB/killmails/user settings.
         removed = []
 
@@ -237,6 +268,13 @@ class EveLocalScanner(QWidget):
 
     def transparency_to_alpha(self, transparency):
         transparency = max(0, min(100, int(transparency)))
+
+        # At 100% transparency a Qt rgba alpha of 0 makes the whole panel fully
+        # invisible and can look broken. Keep 100% visually equal to 99%: almost
+        # fully transparent, but still rendered and draggable/readable by blur.
+        if transparency >= 99:
+            transparency = 99
+
         return int(round(255 * (100 - transparency) / 100))
 
     def build_ui(self):
@@ -251,7 +289,8 @@ class EveLocalScanner(QWidget):
         outer_layout.addWidget(self.main_panel)
 
         layout = QVBoxLayout(self.main_panel)
-        layout.setContentsMargins(3, 3, 3, 3)
+        # Slightly tighter inner frame so the outside border feels thinner/cleaner.
+        layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
 
         self.title_bar = TitleBar(self)
@@ -259,7 +298,8 @@ class EveLocalScanner(QWidget):
 
         self.tabs = EveTabs(self)
         self.tabs.tabChanged.connect(self.switch_tab)
-        layout.addWidget(self.tabs)
+        self.tabs.zkillModeChanged.connect(self.switch_zkill_mode)
+        self.title_bar.set_tabs_widget(self.tabs)
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("MainStack")
@@ -288,6 +328,7 @@ class EveLocalScanner(QWidget):
         self.options_panel.settingsChanged.connect(self.apply_ui_settings)
         self.options_panel.healthCheckRequested.connect(self.show_health_check)
         self.options_panel.clearDataRequested.connect(self.clear_local_data_cache)
+        self.options_panel.generalTableRequested.connect(self.show_general_table_options)
         self.options_panel.set_values(
             self.ui_transparency,
             self.ui_blur,
@@ -302,16 +343,12 @@ class EveLocalScanner(QWidget):
         self.stack.addWidget(self.zkill_panel)
         self.stack.addWidget(self.options_panel)
 
-        bottom_bar = QHBoxLayout()
-        bottom_bar.setContentsMargins(0, 0, 0, 0)
-        bottom_bar.setSpacing(0)
-        bottom_bar.addStretch()
-
+        # Custom border resizing is handled by window_resize.py.
+        # Do not reserve a bottom row for QSizeGrip: it creates an ugly
+        # permanent bottom gap, especially in the zKill tab.
         self.size_grip = QSizeGrip(self.main_panel)
-        self.size_grip.setFixedSize(10, 10)
-        bottom_bar.addWidget(self.size_grip)
-
-        layout.addLayout(bottom_bar)
+        self.size_grip.setFixedSize(1, 1)
+        self.size_grip.hide()
 
         self.apply_ui_settings(
             self.ui_transparency,
@@ -325,6 +362,7 @@ class EveLocalScanner(QWidget):
 
     def setup_table(self):
         self.table.setColumnCount(7)
+        self.table.setHorizontalHeader(GeneralHeaderView(Qt.Horizontal, self.table))
         self.table.setHorizontalHeaderLabels(
             ["", "", "Name", "Danger", "Gang", "Corp/Ally", "Last Ships"]
         )
@@ -345,6 +383,13 @@ class EveLocalScanner(QWidget):
         self.table.setFocusPolicy(Qt.NoFocus)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setShowGrid(False)
+        self.table.setGridStyle(Qt.NoPen)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideRight)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.setAttribute(Qt.WA_StyledBackground, True)
         self.table.setAutoFillBackground(False)
         self.table.viewport().setAutoFillBackground(False)
@@ -359,19 +404,165 @@ class EveLocalScanner(QWidget):
         self.table.setColumnWidth(0, 18)
         self.table.setColumnWidth(1, 14)
 
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(
-            3, QHeaderView.ResizeToContents
-        )
-        self.table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeToContents
-        )
-        self.table.horizontalHeader().setSectionResizeMode(
-            5, QHeaderView.ResizeToContents
-        )
-        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        header = self.table.horizontalHeader()
+        header.setSectionsMovable(False)
+        # Keep the last visible column filling all remaining window space.
+        # User can still drag the previous separators; the last column expands
+        # automatically instead of leaving an empty gap on the right.
+        header.setStretchLastSection(True)
+        self.table.horizontalScrollBar().setValue(0)
 
-        self.table.verticalHeader().setDefaultSectionSize(20)
+        for col in (2, 3, 4, 5, 6):
+            header.setSectionResizeMode(col, QHeaderView.Interactive)
+
+        # Initial widths. After this, user can drag every separator manually.
+        self.apply_general_column_widths()
+        self.apply_general_column_visibility()
+        header.sectionResized.connect(self.on_general_column_resized)
+
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.table.verticalHeader().setMinimumSectionSize(18)
+        self.table.verticalHeader().setDefaultSectionSize(22)
+
+    def apply_general_column_widths(self):
+        self._loading_general_column_widths = True
+
+        try:
+            widths = (self.general_table_settings or {}).get("column_widths", {})
+
+            defaults = {
+                "2": 120,
+                "3": 64,
+                "4": 54,
+                "5": 86,
+                "6": 190,
+            }
+
+            for col_key, default_width in defaults.items():
+                col = int(col_key)
+                width = int(widths.get(col_key, default_width))
+                self.table.setColumnWidth(col, max(6, width))
+
+        finally:
+            self._loading_general_column_widths = False
+            self._reset_general_horizontal_offset()
+
+    def get_general_visible_columns(self):
+        visible = (self.general_table_settings or {}).get("visible_columns", {})
+        defaults = {
+            "3": True,
+            "4": True,
+            "5": True,
+            "6": True,
+        }
+        return {
+            key: bool(visible.get(key, default))
+            for key, default in defaults.items()
+        }
+
+    def apply_general_column_visibility(self):
+        visible = self.get_general_visible_columns()
+        for col_key, is_visible in visible.items():
+            self.table.setColumnHidden(int(col_key), not bool(is_visible))
+        self._reset_general_horizontal_offset()
+        self.table.viewport().update()
+        self.table.horizontalHeader().viewport().update()
+
+    def save_general_column_visibility(self, visible_columns: dict):
+        current = dict(self.general_table_settings or {})
+        current["visible_columns"] = {
+            str(col): bool(visible_columns.get(str(col), True))
+            for col in ("3", "4", "5", "6")
+        }
+        current["column_widths"] = current.get("column_widths") or self.get_general_column_widths()
+        self.general_table_settings = current
+        save_general_table_settings(self.general_table_settings)
+        self.apply_general_column_visibility()
+
+    def show_general_table_options(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("General Table")
+        dialog.setModal(True)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        title = QLabel("Show columns:")
+        layout.addWidget(title)
+
+        current = self.get_general_visible_columns()
+        checks = {
+            "3": QCheckBox("Danger"),
+            "4": QCheckBox("Gang"),
+            "5": QCheckBox("Corp/Ally"),
+            "6": QCheckBox("Last Ships"),
+        }
+
+        for key in ("3", "4", "5", "6"):
+            checks[key].setChecked(bool(current.get(key, True)))
+            layout.addWidget(checks[key])
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        layout.addWidget(buttons)
+
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: rgba(11, 11, 11, 235);
+                color: {self.ui_text_color};
+                border: 1px solid {self.ui_frame_color};
+            }}
+            QLabel, QCheckBox {{
+                color: {self.ui_text_color};
+                font-size: {self.ui_font_size}pt;
+            }}
+            QPushButton {{
+                background-color: rgba(20, 24, 26, 210);
+                color: {self.ui_text_color};
+                border: 1px solid {self.ui_frame_color};
+                padding: 3px 10px;
+            }}
+            QPushButton:hover {{
+                color: #9ffff2;
+                border-color: #39c7b5;
+            }}
+        """)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.save_general_column_visibility({
+                key: checks[key].isChecked()
+                for key in ("3", "4", "5", "6")
+            })
+
+    def get_general_column_widths(self):
+        return {
+            str(col): int(self.table.columnWidth(col))
+            for col in (2, 3, 4, 5, 6)
+        }
+
+    def save_general_column_widths(self):
+        if getattr(self, "_loading_general_column_widths", False):
+            return
+
+        if not hasattr(self, "table"):
+            return
+
+        self.general_table_settings = {
+            "column_widths": self.get_general_column_widths(),
+            "visible_columns": self.get_general_visible_columns(),
+        }
+        save_general_table_settings(self.general_table_settings)
+
+    def on_general_column_resized(self, logical_index, old_size, new_size):
+        if logical_index not in (2, 3, 4, 5, 6):
+            return
+
+        # Save after the resize event is fully processed. This keeps user.json
+        # stable and avoids fighting Qt while the user drags the separator.
+        QTimer.singleShot(0, self.save_general_column_widths)
 
     def apply_ui_settings(
         self,
@@ -404,6 +595,8 @@ class EveLocalScanner(QWidget):
             )
 
         bg = QColor(self.ui_bg_color)
+        frame = QColor(self.ui_frame_color)
+        frame_alpha = 165
 
         self.setStyleSheet("""
             QWidget#RootWindow {
@@ -414,13 +607,15 @@ class EveLocalScanner(QWidget):
         self.main_panel.setStyleSheet(f"""
             QFrame#MainPanel {{
                 background-color: rgba({bg.red()}, {bg.green()}, {bg.blue()}, {self.ui_alpha});
-                border: 1px solid {self.ui_frame_color};
+                border: 1px solid rgba({frame.red()}, {frame.green()}, {frame.blue()}, {frame_alpha});
+                border-radius: 7px;
             }}
 
             QStackedWidget#MainStack,
             QWidget#GeneralPage,
             QWidget#OptionsPage {{
                 background-color: transparent;
+                border: none;
             }}
         """)
 
@@ -436,7 +631,7 @@ class EveLocalScanner(QWidget):
                 color: {self.ui_text_color};
                 font-size: {self.ui_font_size}pt;
                 outline: none;
-                selection-background-color: rgba(70, 100, 130, 110);
+                selection-background-color: rgba(57, 199, 181, 85);
             }}
 
             QTableWidget::viewport {{
@@ -447,13 +642,13 @@ class EveLocalScanner(QWidget):
             QTableWidget::item {{
                 background: transparent;
                 border: none;
-                padding: 1px 2px;
+                padding: 0px 3px;
                 color: {self.ui_text_color};
                 font-size: {self.ui_font_size}pt;
             }}
 
             QTableWidget::item:selected {{
-                background: rgba(70, 100, 130, 110);
+                background: rgba(57, 199, 181, 85);
             }}
 
             QHeaderView {{
@@ -466,9 +661,44 @@ class EveLocalScanner(QWidget):
                 background-color: transparent;
                 color: {self.ui_text_color};
                 border: none;
-                padding: 2px 2px;
+                border-bottom: none;
+                padding: 1px 3px;
                 font-size: {self.ui_font_size}pt;
                 font-weight: normal;
+            }}
+
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 8px;
+                margin: 0px;
+            }}
+
+            QScrollBar::handle:vertical {{
+                background: rgba(120, 130, 145, 95);
+                min-height: 20px;
+                border-radius: 3px;
+            }}
+
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {{
+                height: 0px;
+                width: 0px;
+                background: transparent;
+            }}
+
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {{
+                background: transparent;
+            }}
+
+            QScrollBar:horizontal {{
+                height: 0px;
+                background: transparent;
+            }}
+
+            QScrollBar::handle:horizontal {{
+                height: 0px;
+                background: transparent;
             }}
         """)
 
@@ -478,6 +708,13 @@ class EveLocalScanner(QWidget):
             self.ui_text_color,
             self.ui_font_size,
         )
+
+        if hasattr(self, "zkill_panel"):
+            self.zkill_panel.apply_ui_settings(
+                font_size=self.ui_font_size,
+                text_color=self.ui_text_color,
+                frame_color=self.ui_frame_color,
+            )
 
         self.title_bar.title.setStyleSheet(f"""
             QLabel {{
@@ -509,7 +746,29 @@ class EveLocalScanner(QWidget):
             widget.setFont(widget_font)
 
         self.update_table_item_fonts(font_size)
-        self.table.verticalHeader().setDefaultSectionSize(max(18, int(font_size) + 10))
+        self.update_table_row_metrics()
+
+        if hasattr(self, "zkill_panel"):
+            self.zkill_panel.apply_ui_settings(
+                font_size=int(font_size),
+                text_color=getattr(self, "ui_text_color", "#d6d6d6"),
+            )
+
+
+    def update_table_row_metrics(self):
+        metrics = QFontMetrics(self.table.font())
+        row_height = max(18, metrics.height() + 4)
+        header_height = max(20, metrics.height() + 6)
+
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideRight)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.table.verticalHeader().setMinimumSectionSize(row_height)
+        self.table.verticalHeader().setDefaultSectionSize(row_height)
+        self.table.horizontalHeader().setFixedHeight(header_height)
+
+        for row in range(self.table.rowCount()):
+            self.table.setRowHeight(row, row_height)
 
 
     def update_table_item_fonts(self, font_size):
@@ -532,8 +791,11 @@ class EveLocalScanner(QWidget):
                 if cell_widget is not None:
                     cell_widget.setFont(font)
 
-        self.table.resizeRowsToContents()
+        self.update_table_row_metrics()
         self.table.viewport().update()
+        header = self.table.horizontalHeader()
+        if hasattr(header, "set_separator_color"):
+            header.set_separator_color(self.ui_frame_color)
         self.table.horizontalHeader().update()
 
     def bg_rgb(self):
@@ -593,6 +855,9 @@ class EveLocalScanner(QWidget):
 
 
     def switch_tab(self, name):
+        if name != "Zkill" and hasattr(self, "zkill_panel"):
+            self.zkill_panel.close_fit_popup()
+
         if name == "General":
             self.stack.setCurrentWidget(self.general_page)
             return
@@ -604,6 +869,41 @@ class EveLocalScanner(QWidget):
         if name == "Options":
             self.stack.setCurrentWidget(self.options_panel)
             return
+
+    def switch_zkill_mode(self, mode):
+        if hasattr(self, "zkill_panel"):
+            self.zkill_panel.set_mode(mode)
+
+
+    def schedule_window_geometry_save(self):
+        if getattr(self, "_loading_window_geometry", False):
+            return
+
+        if not self.isVisible():
+            return
+
+        if hasattr(self, "_geometry_save_timer"):
+            self._geometry_save_timer.start(250)
+
+    def _reset_general_horizontal_offset(self):
+        """Keep General table anchored to the left when the window is narrow."""
+        try:
+            if hasattr(self, "table") and self.table:
+                self.table.horizontalScrollBar().setValue(0)
+                self.table.viewport().update()
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reset_general_horizontal_offset()
+        if hasattr(self, "tabs") and hasattr(self.tabs, "update_compact_labels_for_width"):
+            self.tabs.update_compact_labels_for_width(self.width(), force=True)
+        self.schedule_window_geometry_save()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self.schedule_window_geometry_save()
 
     def start_clipboard_timer(self):
         self.clipboard_timer = QTimer(self)
@@ -623,6 +923,40 @@ class EveLocalScanner(QWidget):
             print("Clipboard error:", e)
             return ""
 
+    def is_clipboard_candidate_for_local(self, text: str) -> bool:
+        """Return True only for clipboard text that can realistically be EVE local.
+
+        This prevents app-generated EFT fittings / other structured text from
+        replacing General. EVE pilot names do not use brackets or most punctuation.
+        """
+        text = str(text or "")
+        if not text.strip():
+            return False
+
+        forbidden_chars = set("[]{}<>|=,:;\t")
+        if any(ch in forbidden_chars for ch in text):
+            return False
+
+        # EFT fits and similar exports usually contain module quantities or
+        # section-like lines. Local chat pilot lists should be plain names.
+        suspicious_tokens = (
+            " x1", " x2", " x3", " x4", " x5",
+            "damage:", "destroyed:", "dropped:", "total:",
+            "ship:", "location:",
+        )
+        lowered = text.lower()
+        if any(token in lowered for token in suspicious_tokens):
+            return False
+
+        # Allow normal EVE name characters: letters, numbers, spaces, apostrophe,
+        # hyphen, dot, underscore and newlines.
+        for ch in text:
+            if ch.isalnum() or ch in " '\n\r-._":
+                continue
+            return False
+
+        return True
+
     def check_clipboard_background(self):
         text = self.read_clipboard_text()
 
@@ -630,6 +964,12 @@ class EveLocalScanner(QWidget):
             return
 
         if text == self.last_clipboard_text:
+            return
+
+        if not self.is_clipboard_candidate_for_local(text):
+            # Mark it as seen so Save Fit / EFT clipboard does not keep being
+            # reprocessed every timer tick, but do not update General.
+            self.last_clipboard_text = text
             return
 
         pilots = parse_pilots(text)
@@ -693,6 +1033,7 @@ class EveLocalScanner(QWidget):
 
     def update_table(self, pilots):
         self.table.setRowCount(len(pilots))
+        self.update_table_row_metrics()
 
         self.relations = {}
         self.row_character_ids = {}
@@ -716,6 +1057,7 @@ class EveLocalScanner(QWidget):
     def update_pilot_row(self, row, result):
         render_pilot_row(self, row, result)
         self.update_existing_table_text_color(self.ui_text_color)
+        self.update_table_row_metrics()
 
     def update_cyno_cell(self, row, cyno):
         render_cyno_cell(self, row, cyno)
@@ -760,8 +1102,9 @@ class EveLocalScanner(QWidget):
 
         self.last_hover_row = row
 
-        active_color = QColor("#2F5F8F")
-        related_color = QColor("#1F5A32")
+        # Cyan/teal hover like the active tab accent, not Windows-blue.
+        active_color = QColor(57, 199, 181, 85)
+        related_color = QColor(57, 199, 181, 38)
 
         related_rows = self.relations.get(row, [])
 
@@ -792,9 +1135,9 @@ class EveLocalScanner(QWidget):
 
         return super().eventFilter(obj, event)
 
-    def open_in_zkill_tab(self, url):
+    def open_in_zkill_tab(self, url, profile_hint: dict | None = None):
         self.tabs.set_active("Zkill")
-        self.zkill_panel.load_url(url)
+        self.zkill_panel.load_url(url, profile_hint=profile_hint)
 
     def get_clicked_last_ship_index(self, row, col, ships):
         if not ships:
@@ -864,8 +1207,14 @@ class EveLocalScanner(QWidget):
             character_id = item.data(Qt.UserRole)
 
             if character_id:
+                corp_item = self.table.item(row, 5)
+                profile_hint = {
+                    "character_name": item.text(),
+                    "corp_ally": corp_item.text() if corp_item else "",
+                }
                 self.open_in_zkill_tab(
-                    f"https://zkillboard.com/character/{character_id}/"
+                    f"https://zkillboard.com/character/{character_id}/",
+                    profile_hint=profile_hint,
                 )
 
             return
@@ -882,6 +1231,7 @@ class EveLocalScanner(QWidget):
             return
 
     def closeEvent(self, event):
+        self.save_general_column_widths()
         self.save_current_window_geometry()
         self.thread_pool.clear()
         self.cyno_pool.clear()

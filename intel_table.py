@@ -1,5 +1,35 @@
-from PySide6.QtCore import Qt, Signal, QEvent
-from PySide6.QtWidgets import QTableWidget, QStyledItemDelegate, QStyle
+from PySide6.QtCore import Qt, Signal, QEvent, QTimer
+from PySide6.QtGui import QColor, QPen
+from PySide6.QtWidgets import QTableWidget, QStyledItemDelegate, QStyle, QHeaderView
+
+
+class GeneralHeaderView(QHeaderView):
+    """Header with separators only after visible data columns.
+
+    Empty icon columns stay clean. Separators are drawn only after:
+    Name, Danger, Gang, Corp/Ally. Last Ships has no right border.
+    """
+
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self.separator_columns = {2, 3, 4, 5}
+        self.separator_color = QColor("#2b4f4b")
+
+    def set_separator_color(self, color):
+        self.separator_color = QColor(color)
+        self.viewport().update()
+
+    def paintSection(self, painter, rect, logicalIndex):
+        super().paintSection(painter, rect, logicalIndex)
+
+        if logicalIndex not in self.separator_columns:
+            return
+
+        painter.save()
+        painter.setPen(QPen(self.separator_color, 1))
+        x = rect.right()
+        painter.drawLine(x, rect.top() + 3, x, rect.bottom() - 3)
+        painter.restore()
 
 
 class RowHighlightDelegate(QStyledItemDelegate):
@@ -13,6 +43,8 @@ class RowHighlightDelegate(QStyledItemDelegate):
             color = table.highlight_rows.get(row)
 
         if color:
+            option.textElideMode = Qt.ElideRight
+
             painter.save()
             painter.fillRect(option.rect, color)
             painter.restore()
@@ -30,6 +62,9 @@ class IntelTable(QTableWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        self.setWordWrap(False)
+        self.setTextElideMode(Qt.ElideRight)
+
         self.last_hover_row = None
         self.highlight_rows = {}
 
@@ -39,6 +74,48 @@ class IntelTable(QTableWidget):
         self.viewport().installEventFilter(self)
 
         self.setItemDelegate(RowHighlightDelegate(self))
+
+    def _lock_horizontal_offset(self):
+        """Hard-lock hidden horizontal scrolling to the left edge.
+
+        Qt can still move the hidden horizontal scrollbar when the user clicks
+        a far-right cell/current index. Since the bar is hidden, this looks like
+        the first columns are pushed outside the app. General should never move
+        horizontally, so reset immediately and once more after the event loop.
+        """
+        try:
+            bar = self.horizontalScrollBar()
+            if bar.value() != 0:
+                bar.setValue(0)
+            self.viewport().update()
+        except Exception:
+            pass
+
+    def _lock_horizontal_offset_later(self):
+        self._lock_horizontal_offset()
+        QTimer.singleShot(0, self._lock_horizontal_offset)
+
+    def scrollTo(self, index, hint=QTableWidget.EnsureVisible):
+        # Let Qt handle vertical movement if needed, then undo only horizontal
+        # movement. This keeps row navigation normal but prevents left shift.
+        super().scrollTo(index, hint)
+        self._lock_horizontal_offset_later()
+
+    def currentChanged(self, current, previous):
+        super().currentChanged(current, previous)
+        self._lock_horizontal_offset_later()
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self._lock_horizontal_offset_later()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self._lock_horizontal_offset_later()
+
+    def mouseDoubleClickEvent(self, event):
+        super().mouseDoubleClickEvent(event)
+        self._lock_horizontal_offset_later()
 
     def set_highlight_rows(self, rows):
         self.highlight_rows = rows or {}
@@ -67,9 +144,13 @@ class IntelTable(QTableWidget):
                 self.last_hover_row = None
                 self.mouseLeft.emit()
 
+        if obj == self.viewport():
+            self._lock_horizontal_offset()
+
         return super().eventFilter(obj, event)
 
     def mouseMoveEvent(self, event):
+        self._lock_horizontal_offset()
         index = self.indexAt(event.pos())
 
         if index.isValid():
@@ -80,6 +161,7 @@ class IntelTable(QTableWidget):
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
+        self._lock_horizontal_offset()
         self.last_hover_row = None
         self.mouseLeft.emit()
         super().leaveEvent(event)

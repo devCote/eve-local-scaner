@@ -9,6 +9,36 @@ from paths import user_data_path
 CACHE_FILE = user_data_path("cache.json")
 
 
+def _json_safe(value):
+    """Return value if JSON serializable, otherwise None marker.
+
+    FileCache is stored as JSON. Binary data such as avatar bytes must not be
+    written here; use a file cache for images instead.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        safe = []
+        for item in value:
+            safe_item = _json_safe(item)
+            if safe_item is not _UNSAFE:
+                safe.append(safe_item)
+        return safe
+    if isinstance(value, dict):
+        safe = {}
+        for key, item in value.items():
+            if not isinstance(key, (str, int, float, bool)):
+                continue
+            safe_item = _json_safe(item)
+            if safe_item is not _UNSAFE:
+                safe[str(key)] = safe_item
+        return safe
+    return _UNSAFE
+
+
+_UNSAFE = object()
+
+
 class FileCache:
     def __init__(self, filename=CACHE_FILE):
         self.filename = Path(filename)
@@ -63,8 +93,14 @@ class FileCache:
             return item.get("value")
 
     def set(self, key: str, value):
+        safe_value = _json_safe(value)
+
+        if safe_value is _UNSAFE:
+            # Do not poison JSON cache with bytes/QPixmap/etc.
+            return
+
         with self.lock:
-            self.data[key] = {"created_at": time.time(), "value": value}
+            self.data[key] = {"created_at": time.time(), "value": safe_value}
 
         self.save()
 
