@@ -24,3 +24,5 @@ dist/
 installer_output/
 build/
 dist/
+installer_output/
+*.exe
