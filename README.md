@@ -137,7 +137,13 @@ It does **not** delete:
 
 ## Installation
 
-### Option 1: Run from source
+### Download latest release
+
+The recommended way to install the app is to download the installer from the latest GitHub release:
+
+[Download EVE Local Intel Scanner V2.0.0](https://github.com/devCote/eve-local-scaner/releases/tag/V2.0.0)
+
+### Run from source
 
 ```bash
 python -m venv .venv
@@ -146,7 +152,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-### Option 2: Build Windows installer
+### Build Windows installer
 
 The project includes PyInstaller and Inno Setup build files.
 
