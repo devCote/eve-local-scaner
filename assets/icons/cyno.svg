@@ -1,0 +1,111 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="coreFront" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="16%" stop-color="#FFDCDC"/>
+      <stop offset="34%" stop-color="#FF3A3A"/>
+      <stop offset="70%" stop-color="#E00000"/>
+      <stop offset="100%" stop-color="#780000"/>
+    </radialGradient>
+
+    <radialGradient id="coreBack" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FFECEC"/>
+      <stop offset="20%" stop-color="#FFB0B0"/>
+      <stop offset="46%" stop-color="#FF2A2A"/>
+      <stop offset="78%" stop-color="#B70000"/>
+      <stop offset="100%" stop-color="#5C0000"/>
+    </radialGradient>
+
+    <radialGradient id="innerGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="1"/>
+      <stop offset="35%" stop-color="#FF6A6A" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#FF0000" stop-opacity="0"/>
+    </radialGradient>
+
+    <filter id="frontGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="backGlow" x="-120%" y="-120%" width="340%" height="340%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="softRed" x="-120%" y="-120%" width="340%" height="340%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#softRed)" opacity="0.35">
+    <circle cx="128" cy="128" r="54" fill="#FF1A1A"/>
+  </g>
+
+  <!-- back duplicate rotated 45 degrees and scaled down by 20% -->
+  <g transform="translate(128 128) rotate(45) scale(0.8) translate(-128 -128)" opacity="0.72" filter="url(#backGlow)">
+    <path
+      d="M128 16
+         C132 72 135 101 142 114
+         C155 121 184 124 240 128
+         C184 132 155 135 142 142
+         C135 155 132 184 128 240
+         C124 184 121 155 114 142
+         C101 135 72 132 16 128
+         C72 124 101 121 114 114
+         C121 101 124 72 128 16Z"
+      fill="url(#coreBack)"/>
+
+    <path
+      d="M128 48
+         C131 85 133 106 138 117
+         C149 122 170 125 208 128
+         C170 131 149 134 138 139
+         C133 150 131 171 128 208
+         C125 171 123 150 118 139
+         C107 134 86 131 48 128
+         C86 125 107 122 118 117
+         C123 106 125 85 128 48Z"
+      fill="#C60000"
+      opacity="0.9"/>
+  </g>
+
+  <!-- main front cyno -->
+  <g filter="url(#frontGlow)">
+    <path
+      d="M128 12
+         C132 72 135 101 142 114
+         C155 121 184 124 244 128
+         C184 132 155 135 142 142
+         C135 155 132 184 128 244
+         C124 184 121 155 114 142
+         C101 135 72 132 12 128
+         C72 124 101 121 114 114
+         C121 101 124 72 128 12Z"
+      fill="url(#coreFront)"/>
+
+    <path
+      d="M128 45
+         C131 84 133 105 138 117
+         C150 123 171 125 211 128
+         C171 131 150 133 138 139
+         C133 151 131 172 128 211
+         C125 172 123 151 118 139
+         C106 133 85 131 45 128
+         C85 125 106 123 118 117
+         C123 105 125 84 128 45Z"
+      fill="#FF1E1E"
+      opacity="0.95"/>
+
+    <circle cx="128" cy="128" r="31" fill="url(#innerGlow)"/>
+    <circle cx="128" cy="128" r="9" fill="#FFFFFF"/>
+    <path d="M128 99 L131 122 L157 128 L131 134 L128 157 L125 134 L99 128 L125 122 Z"
+          fill="#FFDADA"
+          opacity="0.95"/>
+  </g>
+</svg>

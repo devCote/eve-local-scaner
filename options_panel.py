@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from user_settings import DEFAULT_UI_SETTINGS
+from app_fonts import APP_FONT_FAMILY
 
 
 class FlowLayout(QLayout):
@@ -106,8 +107,8 @@ class FlowLayout(QLayout):
 
 
 class OptionsPanel(QWidget):
-    # transparency, blur, font_size, frame_color, text_color, bg_color
-    settingsChanged = Signal(int, int, int, str, str, str)
+    # transparency, blur, font_size, compact_zkill, frame_color, text_color, bg_color
+    settingsChanged = Signal(int, int, int, int, str, str, str)
     clearDataRequested = Signal()
     healthCheckRequested = Signal()
     generalTableRequested = Signal()
@@ -118,6 +119,7 @@ class OptionsPanel(QWidget):
         self.transparency = DEFAULT_UI_SETTINGS["transparency"]
         self.blur = DEFAULT_UI_SETTINGS["blur"]
         self.font_size = DEFAULT_UI_SETTINGS["font_size"]
+        self.compact_zkill = DEFAULT_UI_SETTINGS.get("compact_zkill", 0)
         self.frame_color = DEFAULT_UI_SETTINGS["frame_color"]
         self.text_color = DEFAULT_UI_SETTINGS["text_color"]
         self.bg_color = DEFAULT_UI_SETTINGS["bg_color"]
@@ -171,7 +173,7 @@ class OptionsPanel(QWidget):
         self.font_label.setObjectName("OptionSliderLabel")
         self.font_slider = QSlider(Qt.Horizontal)
         self.font_slider.setObjectName("CyanOptionSlider")
-        self.font_slider.setRange(8, 14)
+        self.font_slider.setRange(8, 11)
         self.font_slider.setValue(self.font_size)
         self.font_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.font_slider.valueChanged.connect(self.on_font_changed)
@@ -220,6 +222,11 @@ class OptionsPanel(QWidget):
         self.blur_check.toggled.connect(self.on_blur_toggled)
         layout.addWidget(self.blur_check)
 
+        self.compact_zkill_check = QCheckBox("Compact Zkill")
+        self.compact_zkill_check.setChecked(bool(self.compact_zkill))
+        self.compact_zkill_check.toggled.connect(self.on_compact_zkill_toggled)
+        layout.addWidget(self.compact_zkill_check)
+
         layout.addLayout(self.button_wrap)
 
         layout.addStretch()
@@ -265,6 +272,7 @@ class OptionsPanel(QWidget):
             QWidget {{
                 background: transparent;
                 color: {self.text_color};
+                font-family: '{APP_FONT_FAMILY}';
                 font-size: {self.font_size}pt;
             }}
 
@@ -286,7 +294,7 @@ class OptionsPanel(QWidget):
             QLabel {{
                 color: {self.text_color};
                 background: transparent;
-                font-size: {self.font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self.font_size}pt;
             }}
 
             QPushButton {{
@@ -294,7 +302,7 @@ class OptionsPanel(QWidget):
                 color: {self.text_color};
                 border: 1px solid {self.frame_color};
                 padding: 4px 8px;
-                font-size: {self.font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self.font_size}pt;
             }}
 
             QPushButton:hover {{
@@ -319,7 +327,7 @@ class OptionsPanel(QWidget):
                 color: {self.text_color};
                 background: transparent;
                 spacing: 7px;
-                font-size: {self.font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self.font_size}pt;
             }}
 
             QCheckBox::indicator {{
@@ -337,7 +345,7 @@ class OptionsPanel(QWidget):
             QLabel#OptionSliderLabel {{
                 color: {self.text_color};
                 background: transparent;
-                font-size: {self.font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self.font_size}pt;
                 min-width: 112px;
             }}
 
@@ -415,16 +423,18 @@ class OptionsPanel(QWidget):
         transparency,
         blur,
         font_size,
-        frame_color,
-        text_color,
-        bg_color,
+        compact_zkill=0,
+        frame_color="#161616",
+        text_color="#d6d6d6",
+        bg_color="#0b0b0b",
         emit=False,
     ):
         self._loading_values = True
 
         self.transparency = max(0, min(100, int(transparency)))
         self.blur = 1 if int(blur) else 0
-        self.font_size = max(8, min(14, int(font_size)))
+        self.font_size = max(8, min(11, int(font_size)))
+        self.compact_zkill = 1 if int(compact_zkill) else 0
         self.frame_color = str(frame_color).lower()
         self.text_color = str(text_color).lower()
         self.bg_color = str(bg_color).lower()
@@ -432,6 +442,7 @@ class OptionsPanel(QWidget):
         self.transparency_slider.setValue(self.transparency)
         self.font_slider.setValue(self.font_size)
         self.blur_check.setChecked(bool(self.blur))
+        self.compact_zkill_check.setChecked(bool(self.compact_zkill))
 
         self._loading_values = False
 
@@ -452,6 +463,7 @@ class OptionsPanel(QWidget):
             self.transparency,
             self.blur,
             self.font_size,
+            self.compact_zkill,
             self.frame_color,
             self.text_color,
             self.bg_color,
@@ -465,6 +477,10 @@ class OptionsPanel(QWidget):
         self.blur = 1 if checked else 0
         self.emit_settings()
 
+    def on_compact_zkill_toggled(self, checked):
+        self.compact_zkill = 1 if checked else 0
+        self.emit_settings()
+
     def on_font_changed(self, value):
         self.font_size = int(value)
         self.emit_settings()
@@ -475,6 +491,7 @@ class OptionsPanel(QWidget):
             defaults["transparency"],
             defaults["blur"],
             defaults["font_size"],
+            defaults.get("compact_zkill", 0),
             defaults["frame_color"],
             defaults["text_color"],
             defaults["bg_color"],

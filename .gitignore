@@ -1,28 +1,30 @@
-venv/
-data/
+# Python
 .venv/
-assets/
+venv/
 __pycache__/
-installer_output/
 *.pyc
 *.pyo
 *.pyd
+
+# IDE
 .idea/
 .vscode/
-dist/
-build/
-*.spec
-cache.json
+
+# Runtime/user data
+data/
 killmails/
-logs/installer_output/
-build/
-dist/
-*.spec.bak
-*.txt
+cache.json
+user.json
+logs/
 *.log
-*.md
-installer_output/
+
+# Build/installer output
 build/
 dist/
 installer_output/
 *.exe
+*.msi
+*.spec.bak
+
+# Local scratch exports
+Pasted text.txt

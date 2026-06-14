@@ -13,10 +13,16 @@ ESI name -> character_id resolving is measured separately and is not included in
 """
 
 from __future__ import annotations
+# Allow running this script from tools/ while importing runtime modules from project root.
+from pathlib import Path as _Path
+import sys as _sys
+_ROOT = _Path(__file__).resolve().parents[2]
+if str(_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_ROOT))
+
 
 import argparse
 import statistics
-import sys
 import time
 from dataclasses import dataclass
 from typing import Any

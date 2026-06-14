@@ -32,9 +32,20 @@ class ZkillPanel(QWidget):
         self.viewer = ZKillViewer(self)
         layout.addWidget(self.viewer, 1)
 
-    def apply_ui_settings(self, font_size: int | None = None, text_color: str | None = None, frame_color: str | None = None):
+    def apply_ui_settings(
+        self,
+        font_size: int | None = None,
+        text_color: str | None = None,
+        frame_color: str | None = None,
+        compact_zkill: int | bool | None = None,
+    ):
         if hasattr(self, "viewer"):
-            self.viewer.apply_ui_settings(font_size=font_size, text_color=text_color, frame_color=frame_color)
+            self.viewer.apply_ui_settings(
+                font_size=font_size,
+                text_color=text_color,
+                frame_color=frame_color,
+                compact_zkill=compact_zkill,
+            )
 
     def set_mode(self, mode: str):
         if hasattr(self, "viewer"):
@@ -43,6 +54,10 @@ class ZkillPanel(QWidget):
     def close_fit_popup(self):
         if hasattr(self, "viewer"):
             self.viewer.close_fit_popup()
+
+    def reposition_fit_popup(self):
+        if hasattr(self, "viewer"):
+            self.viewer.reposition_fit_popup()
 
     def load_url(self, url: str, profile_hint: dict | None = None):
         """Compatibility method used by ui.py.
@@ -105,6 +120,10 @@ class ZkillPanel(QWidget):
             return
 
         self.current_url = f"https://zkillboard.com/character/{character_id}/"
+        window = self.window()
+        tabs = getattr(window, "tabs", None)
+        if tabs and hasattr(tabs, "set_zkill_mode"):
+            tabs.set_zkill_mode("All", emit=False)
         self.viewer.open_character(character_id, character_name, profile_hint=profile_hint)
 
     def open_character(self, character_id: int, character_name: str = "Unknown", profile_hint: dict | None = None):

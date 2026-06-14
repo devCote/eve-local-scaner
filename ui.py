@@ -1,15 +1,14 @@
 import sys
-import os
+import shutil
 import pyperclip
 
-from PySide6.QtCore import Qt, QThreadPool, QTimer, QPoint
+from PySide6.QtCore import QEvent, Qt, QThreadPool, QTimer, QPoint
 from PySide6.QtGui import QColor, QCursor, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QSizeGrip,
     QWidget,
     QVBoxLayout,
-    QHBoxLayout,
     QLabel,
     QTableWidget,
     QHeaderView,
@@ -17,9 +16,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QStackedWidget,
     QMessageBox,
-    QDialog,
-    QDialogButtonBox,
-    QCheckBox,
 )
 
 from parser import parse_pilots
@@ -50,6 +46,9 @@ from row_renderer import (
 )
 
 from window_resize import handle_resize_event
+from general_table_options import show_general_table_options_dialog
+from zkill_fit_popup import FittingPanelPopup
+from app_fonts import APP_FONT_FAMILY
 
 
 class EveLocalScanner(QWidget):
@@ -60,7 +59,7 @@ class EveLocalScanner(QWidget):
         self.setObjectName("RootWindow")
         self.resize(760, 440)
 
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMinimumSize(250, 200)
 
@@ -79,7 +78,8 @@ class EveLocalScanner(QWidget):
         self.ui_transparency = int(self.user_settings["transparency"])
         self.ui_alpha = self.transparency_to_alpha(self.ui_transparency)
         self.ui_blur = int(self.user_settings["blur"])
-        self.ui_font_size = int(self.user_settings["font_size"])
+        self.ui_font_size = max(8, min(11, int(self.user_settings["font_size"])))
+        self.ui_compact_zkill = 1 if int(self.user_settings.get("compact_zkill", 0)) else 0
         self.ui_frame_color = self.user_settings["frame_color"]
         self.ui_text_color = self.user_settings["text_color"]
         self.ui_bg_color = self.user_settings["bg_color"]
@@ -122,6 +122,7 @@ class EveLocalScanner(QWidget):
             app.installEventFilter(self)
 
         self.start_clipboard_timer()
+        QTimer.singleShot(0, self.apply_default_always_on_top)
 
 
     def _is_window_drag_area(self, widget) -> bool:
@@ -199,7 +200,8 @@ class EveLocalScanner(QWidget):
         reply = QMessageBox.question(
             self,
             "Clear local data/cache",
-            "Are you sure you want to delete local data/cache?",
+            "Are you sure you want to delete cache, avatars and logs?\n\n"
+            "Database, killmail archives and user settings will not be deleted.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -207,31 +209,60 @@ class EveLocalScanner(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # Keep this conservative: only clear cache files, not DB/killmails/user settings.
+        # Clear only disposable data:
+        #   %LOCALAPPDATA%/EVE Local Intel Scanner/cache.json
+        #   %LOCALAPPDATA%/EVE Local Intel Scanner/unavailable_archives.json
+        #   %LOCALAPPDATA%/EVE Local Intel Scanner/cache/*
+        #   %LOCALAPPDATA%/EVE Local Intel Scanner/avatars/*
+        #   %LOCALAPPDATA%/EVE Local Intel Scanner/logs/*
+        # Do not touch local_intel.sqlite, killmails/, user.json or window/table settings.
         removed = []
 
-        for name in ("cache.json", "unavailable_archives.json"):
-            path = USER_DATA_DIR / name
-
+        def remove_file(path):
             try:
-                if path.exists():
+                if path.exists() and path.is_file():
                     path.unlink()
                     removed.append(str(path))
             except Exception as e:
                 QMessageBox.warning(self, "Clear local data/cache", f"Failed to remove:\n{path}\n\n{e}")
-                return
+                raise
+
+        def clear_folder(folder):
+            try:
+                if not folder.exists():
+                    return
+
+                for child in folder.iterdir():
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                    removed.append(str(child))
+            except Exception as e:
+                QMessageBox.warning(self, "Clear local data/cache", f"Failed to clear folder:\n{folder}\n\n{e}")
+                raise
+
+        try:
+            for name in ("cache.json", "unavailable_archives.json"):
+                remove_file(USER_DATA_DIR / name)
+
+            for folder_name in ("cache", "avatars", "logs"):
+                clear_folder(USER_DATA_DIR / folder_name)
+
+        except Exception:
+            return
 
         if removed:
             QMessageBox.information(
                 self,
                 "Clear local data/cache",
-                "Removed:\n" + "\n".join(removed),
+                "Removed:\n" + "\n".join(removed[:80]) + ("\n..." if len(removed) > 80 else ""),
             )
         else:
             QMessageBox.information(
                 self,
                 "Clear local data/cache",
-                "No cache files found.",
+                "No cache/avatar/log files found.",
             )
 
     def apply_saved_window_geometry(self):
@@ -294,6 +325,9 @@ class EveLocalScanner(QWidget):
         layout.setSpacing(2)
 
         self.title_bar = TitleBar(self)
+        self.title_bar.top_button.blockSignals(True)
+        self.title_bar.top_button.setChecked(True)
+        self.title_bar.top_button.blockSignals(False)
         layout.addWidget(self.title_bar)
 
         self.tabs = EveTabs(self)
@@ -322,6 +356,7 @@ class EveLocalScanner(QWidget):
         general_layout.addWidget(self.table, 1)
 
         self.zkill_panel = ZkillPanel(self)
+        self.general_fit_popup = FittingPanelPopup(self)
         self.options_panel = OptionsPanel(self)
         self.options_panel.setObjectName("OptionsPage")
         self.options_panel.setAttribute(Qt.WA_StyledBackground, True)
@@ -333,6 +368,7 @@ class EveLocalScanner(QWidget):
             self.ui_transparency,
             self.ui_blur,
             self.ui_font_size,
+            self.ui_compact_zkill,
             self.ui_frame_color,
             self.ui_text_color,
             self.ui_bg_color,
@@ -354,6 +390,7 @@ class EveLocalScanner(QWidget):
             self.ui_transparency,
             self.ui_blur,
             self.ui_font_size,
+            self.ui_compact_zkill,
             self.ui_frame_color,
             self.ui_text_color,
             self.ui_bg_color,
@@ -480,62 +517,15 @@ class EveLocalScanner(QWidget):
         self.apply_general_column_visibility()
 
     def show_general_table_options(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("General Table")
-        dialog.setModal(True)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(8)
-
-        title = QLabel("Show columns:")
-        layout.addWidget(title)
-
-        current = self.get_general_visible_columns()
-        checks = {
-            "3": QCheckBox("Danger"),
-            "4": QCheckBox("Gang"),
-            "5": QCheckBox("Corp/Ally"),
-            "6": QCheckBox("Last Ships"),
-        }
-
-        for key in ("3", "4", "5", "6"):
-            checks[key].setChecked(bool(current.get(key, True)))
-            layout.addWidget(checks[key])
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        layout.addWidget(buttons)
-
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-
-        dialog.setStyleSheet(f"""
-            QDialog {{
-                background-color: rgba(11, 11, 11, 235);
-                color: {self.ui_text_color};
-                border: 1px solid {self.ui_frame_color};
-            }}
-            QLabel, QCheckBox {{
-                color: {self.ui_text_color};
-                font-size: {self.ui_font_size}pt;
-            }}
-            QPushButton {{
-                background-color: rgba(20, 24, 26, 210);
-                color: {self.ui_text_color};
-                border: 1px solid {self.ui_frame_color};
-                padding: 3px 10px;
-            }}
-            QPushButton:hover {{
-                color: #9ffff2;
-                border-color: #39c7b5;
-            }}
-        """)
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.save_general_column_visibility({
-                key: checks[key].isChecked()
-                for key in ("3", "4", "5", "6")
-            })
+        result = show_general_table_options_dialog(
+            self,
+            self.get_general_visible_columns(),
+            font_size=self.ui_font_size,
+            text_color=self.ui_text_color,
+            frame_color=self.ui_frame_color,
+        )
+        if result is not None:
+            self.save_general_column_visibility(result)
 
     def get_general_column_widths(self):
         return {
@@ -569,6 +559,7 @@ class EveLocalScanner(QWidget):
         transparency,
         blur=0,
         font_size=10,
+        compact_zkill=0,
         frame_color="#161616",
         text_color="#d6d6d6",
         bg_color="#0b0b0b",
@@ -577,7 +568,8 @@ class EveLocalScanner(QWidget):
         self.ui_transparency = max(0, min(100, int(transparency)))
         self.ui_alpha = self.transparency_to_alpha(self.ui_transparency)
         self.ui_blur = 1 if int(blur) else 0
-        self.ui_font_size = int(font_size)
+        self.ui_font_size = max(8, min(11, int(font_size)))
+        self.ui_compact_zkill = 1 if int(compact_zkill) else 0
         self.ui_frame_color = str(frame_color).lower()
         self.ui_text_color = str(text_color).lower()
         self.ui_bg_color = str(bg_color).lower()
@@ -588,6 +580,7 @@ class EveLocalScanner(QWidget):
                     "transparency": self.ui_transparency,
                     "blur": self.ui_blur,
                     "font_size": self.ui_font_size,
+                    "compact_zkill": self.ui_compact_zkill,
                     "frame_color": self.ui_frame_color,
                     "text_color": self.ui_text_color,
                     "bg_color": self.ui_bg_color,
@@ -629,7 +622,7 @@ class EveLocalScanner(QWidget):
                 border: none;
                 gridline-color: transparent;
                 color: {self.ui_text_color};
-                font-size: {self.ui_font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self.ui_font_size}pt;
                 outline: none;
                 selection-background-color: rgba(57, 199, 181, 85);
             }}
@@ -644,7 +637,7 @@ class EveLocalScanner(QWidget):
                 border: none;
                 padding: 0px 3px;
                 color: {self.ui_text_color};
-                font-size: {self.ui_font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self.ui_font_size}pt;
             }}
 
             QTableWidget::item:selected {{
@@ -663,7 +656,7 @@ class EveLocalScanner(QWidget):
                 border: none;
                 border-bottom: none;
                 padding: 1px 3px;
-                font-size: {self.ui_font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self.ui_font_size}pt;
                 font-weight: normal;
             }}
 
@@ -714,12 +707,13 @@ class EveLocalScanner(QWidget):
                 font_size=self.ui_font_size,
                 text_color=self.ui_text_color,
                 frame_color=self.ui_frame_color,
+                compact_zkill=self.ui_compact_zkill,
             )
 
         self.title_bar.title.setStyleSheet(f"""
             QLabel {{
                 color: {self.ui_text_color};
-                font-size: {self.ui_font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self.ui_font_size}pt;
                 font-weight: normal;
                 background-color: transparent;
             }}
@@ -731,17 +725,20 @@ class EveLocalScanner(QWidget):
 
     def apply_font_size(self, font_size):
         font = self.font()
+        font.setFamily(APP_FONT_FAMILY)
         font.setPointSize(int(font_size))
         self.setFont(font)
 
         app = QApplication.instance()
         if app:
             app_font = app.font()
+            app_font.setFamily(APP_FONT_FAMILY)
             app_font.setPointSize(int(font_size))
             app.setFont(app_font)
 
         for widget in self.findChildren(QWidget):
             widget_font = widget.font()
+            widget_font.setFamily(APP_FONT_FAMILY)
             widget_font.setPointSize(int(font_size))
             widget.setFont(widget_font)
 
@@ -773,6 +770,7 @@ class EveLocalScanner(QWidget):
 
     def update_table_item_fonts(self, font_size):
         font = self.table.font()
+        font.setFamily(APP_FONT_FAMILY)
         font.setPointSize(int(font_size))
 
         self.table.setFont(font)
@@ -819,6 +817,7 @@ class EveLocalScanner(QWidget):
                 self.ui_transparency,
                 self.ui_blur,
                 self.ui_font_size,
+                self.ui_compact_zkill,
                 self.ui_frame_color,
                 self.ui_text_color,
                 self.ui_bg_color,
@@ -858,6 +857,9 @@ class EveLocalScanner(QWidget):
         if name != "Zkill" and hasattr(self, "zkill_panel"):
             self.zkill_panel.close_fit_popup()
 
+        if name != "General" and hasattr(self, "general_fit_popup"):
+            self.general_fit_popup.hide_panel(force=True)
+
         if name == "General":
             self.stack.setCurrentWidget(self.general_page)
             return
@@ -894,21 +896,53 @@ class EveLocalScanner(QWidget):
         except Exception:
             pass
 
+    def _reposition_visible_fit_popups(self):
+        try:
+            if hasattr(self, "general_fit_popup") and self.general_fit_popup:
+                self.general_fit_popup.follow_owner_position()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "zkill_panel") and self.zkill_panel:
+                self.zkill_panel.reposition_fit_popup()
+        except Exception:
+            pass
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._reset_general_horizontal_offset()
         if hasattr(self, "tabs") and hasattr(self.tabs, "update_compact_labels_for_width"):
             self.tabs.update_compact_labels_for_width(self.width(), force=True)
+        self._reposition_visible_fit_popups()
         self.schedule_window_geometry_save()
 
     def moveEvent(self, event):
         super().moveEvent(event)
+        self._reposition_visible_fit_popups()
         self.schedule_window_geometry_save()
 
     def start_clipboard_timer(self):
+        """Watch clipboard changes without polling every 700ms.
+
+        QApplication.clipboard().dataChanged is emitted when the user copies
+        text with Ctrl+C in EVE/Windows. We debounce a little because clipboard
+        data can arrive a few ms after the event.
+        """
         self.clipboard_timer = QTimer(self)
+        self.clipboard_timer.setSingleShot(True)
         self.clipboard_timer.timeout.connect(self.check_clipboard_background)
-        self.clipboard_timer.start(700)
+
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            try:
+                clipboard.dataChanged.connect(self.schedule_clipboard_check)
+            except Exception as exc:
+                print("Clipboard signal error:", exc)
+
+    def schedule_clipboard_check(self):
+        if hasattr(self, "clipboard_timer"):
+            self.clipboard_timer.start(80)
 
     def read_clipboard_text(self):
         try:
@@ -985,6 +1019,17 @@ class EveLocalScanner(QWidget):
         self.last_clipboard_text = text
         self.last_pilots = pilots
         self.update_table(pilots)
+
+    def apply_default_always_on_top(self):
+        """Always on top is enabled by default on every launch."""
+        try:
+            if hasattr(self, "title_bar") and hasattr(self.title_bar, "top_button"):
+                self.title_bar.top_button.blockSignals(True)
+                self.title_bar.top_button.setChecked(True)
+                self.title_bar.top_button.blockSignals(False)
+            self.force_windows_topmost(True)
+        except Exception as exc:
+            print("Default topmost error:", exc)
 
     def force_windows_topmost(self, enabled: bool):
         if sys.platform != "win32":
@@ -1129,7 +1174,32 @@ class EveLocalScanner(QWidget):
         self.title_bar.title.setText("Overview (Local Intel)")
         self.tabs.set_linked_count(0)
 
+    def _is_general_table_object(self, obj) -> bool:
+        if not hasattr(self, "table") or self.table is None:
+            return False
+
+        table = self.table
+        return obj in (
+            table,
+            table.viewport(),
+            table.horizontalHeader(),
+            table.verticalHeader(),
+        )
+
     def eventFilter(self, obj, event):
+        # General Last Ships fit popup: right click / wheel click closes it
+        # instead of leaving it pinned on screen.
+        if (
+            event.type() == QEvent.MouseButtonPress
+            and event.button() in (Qt.RightButton, Qt.MiddleButton)
+            and hasattr(self, "general_fit_popup")
+            and self.general_fit_popup.isVisible()
+            and self._is_general_table_object(obj)
+        ):
+            self.general_fit_popup.hide_panel(force=True)
+            event.accept()
+            return True
+
         if handle_resize_event(self, obj, event):
             return True
 
@@ -1178,24 +1248,29 @@ class EveLocalScanner(QWidget):
 
         return max(0, len(ships) - 1)
 
-    def open_last_ship_loss(self, ship):
+    def open_last_ship_popup(self, ship):
+        """Open the same native fitting popup used by the zKill table.
+
+        Last Ships contains recent loss killmail ids from the local DB, so the
+        popup can resolve the hash and full fit through the existing
+        NativeFitFetchThread path.
+        """
         if not ship:
             return
 
-        loss_url = ship.get("last_loss_url")
-
-        if loss_url:
-            self.open_in_zkill_tab(loss_url)
-            return
-
         killmail_id = ship.get("killmail_id")
-        if killmail_id:
-            self.open_in_zkill_tab(f"https://zkillboard.com/kill/{killmail_id}/")
+        if not killmail_id:
             return
 
-        ship_type_id = ship.get("ship_type_id")
-        if ship_type_id:
-            self.open_in_zkill_tab(f"https://zkillboard.com/ship/{ship_type_id}/")
+        row_data = dict(ship)
+        row_data.setdefault("kind", "loss")
+        row_data.setdefault("ship_name", ship.get("name") or ship.get("display_name") or "Ship")
+        row_data.setdefault("ship_type_id", ship.get("ship_type_id"))
+
+        if hasattr(self, "zkill_panel"):
+            self.zkill_panel.close_fit_popup()
+
+        self.general_fit_popup.show_for_row(row_data, self.table, pinned=True)
 
     def on_cell_double_clicked(self, row, col):
         item = self.table.item(row, col)
@@ -1227,10 +1302,15 @@ class EveLocalScanner(QWidget):
 
             ship_index = self.get_clicked_last_ship_index(row, col, last_ships)
             ship = last_ships[ship_index]
-            self.open_last_ship_loss(ship)
+            self.open_last_ship_popup(ship)
             return
 
     def closeEvent(self, event):
+        if hasattr(self, "general_fit_popup"):
+            self.general_fit_popup.hide_panel(force=True)
+        if hasattr(self, "zkill_panel"):
+            self.zkill_panel.close_fit_popup()
+
         self.save_general_column_widths()
         self.save_current_window_geometry()
         self.thread_pool.clear()

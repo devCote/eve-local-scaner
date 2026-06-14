@@ -12,16 +12,25 @@ class SpinnerManager(QObject):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.animate)
-        self.timer.start(120)
+
+    def _sync_timer(self):
+        if self.labels:
+            if not self.timer.isActive():
+                self.timer.start(120)
+        elif self.timer.isActive():
+            self.timer.stop()
 
     def add(self, row, label):
         self.labels[row] = label
+        self._sync_timer()
 
     def remove(self, row):
         self.labels.pop(row, None)
+        self._sync_timer()
 
     def animate(self):
         if not self.labels:
+            self._sync_timer()
             return
 
         self.frame_index = (self.frame_index + 1) % len(self.frames)
@@ -42,6 +51,8 @@ class SpinnerManager(QObject):
 
         for row in dead_rows:
             self.remove(row)
+
+        self._sync_timer()
 
     def current_frame(self):
         return self.frames[self.frame_index]

@@ -2,6 +2,8 @@ from PySide6.QtCore import Qt, QPointF
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QRadialGradient
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton
 
+from app_fonts import APP_FONT_FAMILY
+
 
 class TitleIconButton(QPushButton):
     def __init__(self, icon_type, parent=None):
@@ -170,7 +172,7 @@ class TitleBar(QWidget):
         self.title.setStyleSheet(f"""
             QLabel {{
                 color: {text_color};
-                font-size: {font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {font_size}pt;
                 font-weight: normal;
                 background-color: transparent;
             }}

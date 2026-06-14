@@ -7,441 +7,18 @@ It uses API data to build a local EVE-style circular fit view inside Qt.
 from __future__ import annotations
 
 import math
-from pathlib import Path
 from typing import Any
 
-import requests
-from PySide6.QtCore import QPoint, QRectF, Qt, QThread, Signal, QTimer
+from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QRegion
 from PySide6.QtWidgets import QApplication, QFrame, QPushButton
 
-from cache import cache
-from paths import user_data_path
-from zkill_client import TIMEOUT, USER_AGENT
 from user_settings import load_ui_settings
 from windows_blur import enable_eve_blur
-
-
-FITTING_TTL_SECONDS = 24 * 3600
-IMAGE_CACHE_DIR = user_data_path(Path("cache") / "eve_images")
-
-
-def _transparency_to_alpha(transparency: int) -> int:
-    transparency = max(0, min(100, int(transparency)))
-    if transparency >= 99:
-        transparency = 99
-    return int(round(255 * (100 - transparency) / 100))
-
-
-# EVE inventory flags used by fitted modules.
-LOW_FLAGS = set(range(11, 19))        # LoSlot0..LoSlot7
-MID_FLAGS = set(range(19, 27))        # MedSlot0..MedSlot7
-HIGH_FLAGS = set(range(27, 35))       # HiSlot0..HiSlot7
-RIG_FLAGS = set(range(92, 100))       # RigSlot0..RigSlot7
-SUBSYSTEM_FLAGS = set(range(125, 133))
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value or default)
-    except Exception:
-        return default
-
-
-def _image_cache_path(kind: str, type_id: int, size: int) -> Path:
-    IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return IMAGE_CACHE_DIR / f"{kind}_{int(type_id)}_{int(size)}.png"
-
-
-def _download_image_bytes(url: str, cache_path: Path) -> bytes:
-    if cache_path.exists() and cache_path.stat().st_size > 0:
-        return cache_path.read_bytes()
-
-    response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    response.raise_for_status()
-    data = response.content or b""
-    if data:
-        cache_path.write_bytes(data)
-    return data
-
-
-def _download_type_icon(type_id: int, size: int = 64) -> bytes:
-    type_id = int(type_id)
-    cache_path = _image_cache_path("icon", type_id, size)
-    url = f"https://images.evetech.net/types/{type_id}/icon?size={size}"
-    return _download_image_bytes(url, cache_path)
-
-
-def _download_ship_render(type_id: int, size: int = 256) -> bytes:
-    type_id = int(type_id)
-    cache_path = _image_cache_path("render", type_id, size)
-    url = f"https://images.evetech.net/types/{type_id}/render?size={size}"
-    try:
-        return _download_image_bytes(url, cache_path)
-    except Exception:
-        # Some types do not have a render. Fall back to the icon endpoint.
-        return _download_type_icon(type_id, size)
-
-
-def _download_zkill_panel_image(name: str) -> bytes:
-    """Download one transparent zKill fitting panel asset, cached locally.
-
-    This is not a browser render and does not load the zKill page; it only
-    reuses the same transparent PNG assets zKill uses for the fitting panel.
-    """
-    safe_name = str(name).replace("/", "_").replace("\\", "_")
-    cache_path = _image_cache_path("zkbpanel", abs(hash(safe_name)) % 10_000_000, 398)
-    if cache_path.exists() and cache_path.stat().st_size > 0:
-        return cache_path.read_bytes()
-
-    url = f"https://zkillboard.com/img/panel/{name}"
-    return _download_image_bytes(url, cache_path)
-
-
-def _classify_slot(flag: int) -> str | None:
-    if flag in HIGH_FLAGS:
-        return "high"
-    if flag in MID_FLAGS:
-        return "mid"
-    if flag in LOW_FLAGS:
-        return "low"
-    if flag in RIG_FLAGS:
-        return "rig"
-    if flag in SUBSYSTEM_FLAGS:
-        return "subsystem"
-    return None
-
-
-def _extract_fit_items(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    result: dict[str, list[dict[str, Any]]] = {
-        "high": [],
-        "mid": [],
-        "low": [],
-        "rig": [],
-        "subsystem": [],
-    }
-
-    # For high/mid/low slots ESI may include both the fitted module and an
-    # extra charge/ammo item with the SAME slot flag. We must not let the ammo
-    # replace the module in the visible slot. So we group by slot index and keep
-    # one primary module per slot, optionally attaching a charge_type_id.
-    grouped_slots: dict[str, dict[int, dict[str, Any]]] = {
-        "high": {},
-        "mid": {},
-        "low": {},
-    }
-
-    for item in items or []:
-        if not isinstance(item, dict):
-            continue
-
-        type_id = _safe_int(item.get("item_type_id"))
-        flag = _safe_int(item.get("flag"))
-        slot = _classify_slot(flag)
-        if not type_id or not slot:
-            continue
-
-        children = item.get("items") or []
-        charge_type_id = 0
-        if isinstance(children, list):
-            for child in children:
-                if isinstance(child, dict) and child.get("item_type_id"):
-                    charge_type_id = _safe_int(child.get("item_type_id"))
-                    break
-
-        slot_base = {
-            "low": 11,
-            "mid": 19,
-            "high": 27,
-            "rig": 92,
-            "subsystem": 125,
-        }.get(slot, flag)
-        slot_index = max(0, flag - slot_base)
-        quantity = _safe_int(item.get("quantity_destroyed") or item.get("quantity_dropped"), 1)
-        row = {
-            "type_id": type_id,
-            "flag": flag,
-            "slot_index": slot_index,
-            "charge_type_id": charge_type_id,
-            "quantity": quantity,
-        }
-
-        if slot in ("rig", "subsystem"):
-            result[slot].append(row)
-            continue
-
-        bucket = grouped_slots[slot]
-        existing = bucket.get(slot_index)
-        if existing is None:
-            bucket[slot_index] = row
-            continue
-
-        # Prefer a quantity==1 row as the real fitted module.
-        existing_is_module = _safe_int(existing.get("quantity"), 1) == 1
-        current_is_module = quantity == 1
-
-        if current_is_module and not existing_is_module:
-            # The old one was probably ammo/charge. Promote current as module
-            # and keep old type_id as charge if current has none yet.
-            if not row.get("charge_type_id") and existing.get("type_id"):
-                row["charge_type_id"] = _safe_int(existing.get("type_id"))
-            bucket[slot_index] = row
-        elif existing_is_module and not current_is_module:
-            # Existing is the module; current is probably the ammo/charge.
-            if not existing.get("charge_type_id"):
-                existing["charge_type_id"] = type_id
-        else:
-            # Fallback: keep the first item as the visible module, but if it has
-            # no charge yet, attach the later item's type_id as charge.
-            if not existing.get("charge_type_id") and type_id != _safe_int(existing.get("type_id")):
-                existing["charge_type_id"] = type_id
-
-    for slot in ("high", "mid", "low"):
-        rows = list(grouped_slots[slot].values())
-        rows.sort(key=lambda row: int(row.get("flag") or 0))
-        result[slot].extend(rows)
-
-    for key in ("rig", "subsystem"):
-        result[key].sort(key=lambda row: int(row.get("flag") or 0))
-    return result
-
-
-def _resolve_killmail_hash(killmail_id: int, row_data: dict[str, Any]) -> str:
-    zkb = row_data.get("zkb") if isinstance(row_data.get("zkb"), dict) else {}
-    direct = row_data.get("hash") or row_data.get("killmail_hash") or zkb.get("hash")
-    if direct:
-        return str(direct)
-
-    cache_key = f"zkill:kill_hash:{int(killmail_id)}"
-    cached = cache.get(cache_key, ttl_seconds=FITTING_TTL_SECONDS)
-    if cached:
-        return str(cached)
-
-    url = f"https://zkillboard.com/api/killID/{int(killmail_id)}/"
-    response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    response.raise_for_status()
-    data = response.json()
-    if isinstance(data, list) and data:
-        zkb = data[0].get("zkb") if isinstance(data[0], dict) else {}
-        kill_hash = zkb.get("hash") if isinstance(zkb, dict) else None
-        if kill_hash:
-            cache.set(cache_key, str(kill_hash))
-            return str(kill_hash)
-
-    raise RuntimeError("Could not resolve killmail hash.")
-
-
-def _load_full_killmail(killmail_id: int, killmail_hash: str) -> dict[str, Any]:
-    cache_key = f"esi:killmail_full:{int(killmail_id)}:{killmail_hash}"
-    cached = cache.get(cache_key, ttl_seconds=FITTING_TTL_SECONDS)
-    if isinstance(cached, dict):
-        return cached
-
-    url = f"https://esi.evetech.net/latest/killmails/{int(killmail_id)}/{killmail_hash}/?datasource=tranquility"
-    response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    response.raise_for_status()
-    data = response.json()
-    if isinstance(data, dict):
-        cache.set(cache_key, data)
-        return data
-    raise RuntimeError("ESI returned invalid killmail data.")
-
-
-def _load_zkb_kill_summary(killmail_id: int, row_data: dict[str, Any]) -> dict[str, Any]:
-    """Return zKB monetary summary for one killmail."""
-    zkb = row_data.get("zkb") if isinstance(row_data.get("zkb"), dict) else {}
-    if zkb and any(key in zkb for key in ("destroyedValue", "droppedValue", "totalValue")):
-        return dict(zkb)
-
-    cache_key = f"zkill:kill_summary:{int(killmail_id)}"
-    cached = cache.get(cache_key, ttl_seconds=FITTING_TTL_SECONDS)
-    if isinstance(cached, dict):
-        return cached
-
-    url = f"https://zkillboard.com/api/killID/{int(killmail_id)}/"
-    response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    response.raise_for_status()
-    data = response.json()
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        zkb = data[0].get("zkb") if isinstance(data[0].get("zkb"), dict) else {}
-        if isinstance(zkb, dict):
-            cache.set(cache_key, zkb)
-            return dict(zkb)
-    return {}
-
-
-def _format_isk_short(value: Any) -> str:
-    try:
-        num = float(value or 0)
-    except Exception:
-        return "-"
-    abs_num = abs(num)
-    if abs_num >= 1_000_000_000:
-        out = f"{num / 1_000_000_000:.2f}".replace('.', ',')
-        return f"{out}b ISK"
-    if abs_num >= 1_000_000:
-        out = f"{num / 1_000_000:.2f}".replace('.', ',')
-        return f"{out}m ISK"
-    if abs_num >= 1_000:
-        out = f"{num / 1_000:.2f}".replace('.', ',')
-        return f"{out}k ISK"
-    out = f"{num:.0f}".replace('.', ',')
-    return f"{out} ISK"
-
-
-def _resolve_type_names(type_ids: list[int]) -> dict[int, str]:
-    ids = sorted({int(t) for t in (type_ids or []) if int(t or 0) > 0})
-    if not ids:
-        return {}
-
-    result: dict[int, str] = {}
-    missing: list[int] = []
-    for type_id in ids:
-        cached = cache.get(f"esi:type_name:{type_id}", ttl_seconds=30 * 24 * 3600)
-        if cached:
-            result[type_id] = str(cached)
-        else:
-            missing.append(type_id)
-
-    if missing:
-        try:
-            url = "https://esi.evetech.net/latest/universe/names/?datasource=tranquility"
-            response = requests.post(url, json=missing, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, list):
-                for row in data:
-                    if isinstance(row, dict):
-                        tid = _safe_int(row.get("id"))
-                        name = str(row.get("name") or "").strip()
-                        if tid and name:
-                            result[tid] = name
-                            cache.set(f"esi:type_name:{tid}", name)
-        except Exception:
-            pass
-
-    # fallback names for any unresolved ids
-    for type_id in ids:
-        result.setdefault(type_id, f"Type {type_id}")
-    return result
-
-
-def _build_eft_fit_text(fit_data: dict[str, Any], row_data: dict[str, Any]) -> str:
-    ship_name = str(fit_data.get("ship_name") or row_data.get("ship_name") or "Ship")
-    items = fit_data.get("items") if isinstance(fit_data.get("items"), dict) else {}
-    type_names = fit_data.get("type_names") if isinstance(fit_data.get("type_names"), dict) else {}
-
-    def name_for(type_id: int) -> str:
-        return str(type_names.get(int(type_id), f"Type {int(type_id)}"))
-
-    lines: list[str] = [f"[{ship_name}, zKill Fit]", ""]
-
-    for slot in ("low", "mid", "high"):
-        slot_items = list(items.get(slot) or [])
-        slot_items.sort(key=lambda row: int(row.get("slot_index") or 0))
-        for row in slot_items:
-            lines.append(name_for(_safe_int(row.get("type_id"))))
-        lines.append("")
-
-    for slot in ("rig", "subsystem"):
-        slot_items = list(items.get(slot) or [])
-        slot_items.sort(key=lambda row: int(row.get("slot_index") or 0))
-        for row in slot_items:
-            lines.append(name_for(_safe_int(row.get("type_id"))))
-        if slot_items:
-            lines.append("")
-
-    charges: list[str] = []
-    for slot in ("high", "mid", "low"):
-        for row in list(items.get(slot) or []):
-            charge_id = _safe_int(row.get("charge_type_id"))
-            if charge_id:
-                charges.append(name_for(charge_id))
-    if charges:
-        for charge_name in charges:
-            lines.append(f"{charge_name} x1")
-        lines.append("")
-
-    while lines and lines[-1] == "":
-        lines.pop()
-    return "\n".join(lines)
-
-
-class NativeFitFetchThread(QThread):
-    loaded = Signal(int, object)
-    failed = Signal(int, str)
-
-    def __init__(self, row_data: dict[str, Any], request_id: int, parent=None):
-        super().__init__(parent)
-        self.row_data = dict(row_data or {})
-        self.request_id = int(request_id)
-
-    def run(self):
-        killmail_id = _safe_int(self.row_data.get("killmail_id"))
-        if not killmail_id:
-            self.failed.emit(self.request_id, "No killmail id.")
-            return
-
-        try:
-            kill_hash = _resolve_killmail_hash(killmail_id, self.row_data)
-            killmail = _load_full_killmail(killmail_id, kill_hash)
-            zkb_summary = _load_zkb_kill_summary(killmail_id, self.row_data)
-            victim = killmail.get("victim") if isinstance(killmail.get("victim"), dict) else {}
-            ship_type_id = _safe_int(victim.get("ship_type_id") or self.row_data.get("ship_type_id"))
-            fit_items = _extract_fit_items(victim.get("items") or [])
-            damage_taken = _safe_int(victim.get("damage_taken"), 0)
-
-            icon_type_ids: set[int] = set()
-            for slot_rows in fit_items.values():
-                for row in slot_rows:
-                    if row.get("type_id"):
-                        icon_type_ids.add(int(row["type_id"]))
-                    if row.get("charge_type_id"):
-                        icon_type_ids.add(int(row["charge_type_id"]))
-
-            images: dict[int, bytes] = {}
-            for type_id in sorted(icon_type_ids):
-                if self.isInterruptionRequested():
-                    return
-                try:
-                    images[type_id] = _download_type_icon(type_id, 64)
-                except Exception:
-                    images[type_id] = b""
-
-            type_names = _resolve_type_names([ship_type_id, *sorted(icon_type_ids)])
-
-            ship_bytes = b""
-            if ship_type_id:
-                try:
-                    ship_bytes = _download_ship_render(ship_type_id, 256)
-                except Exception:
-                    ship_bytes = b""
-
-            panel_images: dict[str, bytes] = {}
-            for panel_name in ("tyrannis.png", "8h.png", "5m.png", "7l.png", "3r.png"):
-                if self.isInterruptionRequested():
-                    return
-                try:
-                    panel_images[panel_name] = _download_zkill_panel_image(panel_name)
-                except Exception:
-                    panel_images[panel_name] = b""
-
-            self.loaded.emit(self.request_id, {
-                "killmail_id": killmail_id,
-                "ship_name": self.row_data.get("ship_name") or "Ship",
-                "ship_type_id": ship_type_id,
-                "ship_image": ship_bytes,
-                "items": fit_items,
-                "images": images,
-                "type_names": type_names,
-                "panel_images": panel_images,
-                "damage_taken": damage_taken,
-                "destroyed_value": zkb_summary.get("destroyedValue", 0),
-                "dropped_value": zkb_summary.get("droppedValue", 0),
-                "total_value": zkb_summary.get("totalValue", 0),
-            })
-        except Exception as exc:
-            self.failed.emit(self.request_id, str(exc))
+from app_fonts import APP_FONT_FAMILY
+from zkill_fit_export import build_eft_fit_text
+from zkill_fit_fetcher import NativeFitFetchThread
+from zkill_fit_utils import format_isk_short, safe_int, transparency_to_alpha
 
 
 class FittingPanelPopup(QFrame):
@@ -471,16 +48,18 @@ class FittingPanelPopup(QFrame):
         self._hovered_module_name = ""
         self._loading_phase = 0.0
         self._loading_timer = QTimer(self)
-        self._loading_timer.setInterval(55)
+        self._loading_timer.setInterval(110)
         self._loading_timer.timeout.connect(self._advance_loading_animation)
+        self._owner_widget = None
 
         # Visual settings copied from the main app at show time.
         settings = load_ui_settings()
         self._ui_transparency = int(settings.get("transparency", 10))
-        self._ui_alpha = _transparency_to_alpha(self._ui_transparency)
+        self._ui_alpha = transparency_to_alpha(self._ui_transparency)
         self._ui_blur = int(settings.get("blur", 0))
         self._ui_bg_color = str(settings.get("bg_color", "#0b0b0b"))
         self._ui_frame_color = str(settings.get("frame_color", "#161616"))
+        self._ui_text_color = str(settings.get("text_color", "#d6d6d6"))
 
         self.setFixedSize(398, 398)
         self._apply_circle_mask()
@@ -488,15 +67,52 @@ class FittingPanelPopup(QFrame):
         self.save_fit_button = QPushButton("Save Fit", self)
         self.save_fit_button.setCursor(Qt.PointingHandCursor)
         self.save_fit_button.clicked.connect(self._copy_fit_to_clipboard)
+        self.save_fit_button.installEventFilter(self)
+        self._apply_save_fit_button_style()
+        self.save_fit_button.hide()
+
+    def _apply_save_fit_button_style(self):
+        frame = QColor(self._ui_frame_color)
+        if not frame.isValid():
+            frame = QColor("#3D424A")
+
+        text = QColor(self._ui_text_color)
+        if not text.isValid():
+            text = QColor("#d6d6d6")
+
+        bg = QColor(self._ui_bg_color)
+        if not bg.isValid():
+            bg = QColor("#0b0b0b")
+
+        r, g, b = frame.red(), frame.green(), frame.blue()
+        tr, tg, tb = text.red(), text.green(), text.blue()
+        br, bg_g, bb = bg.red(), bg.green(), bg.blue()
+
+        # Default button background uses the current global Background color.
+        # Hover is the same color, only slightly brighter.
+        hover_r = min(255, int(br * 1.22) + 10)
+        hover_g = min(255, int(bg_g * 1.22) + 10)
+        hover_b = min(255, int(bb * 1.22) + 10)
+        pressed_r = min(255, int(br * 1.35) + 14)
+        pressed_g = min(255, int(bg_g * 1.35) + 14)
+        pressed_b = min(255, int(bb * 1.35) + 14)
+
         self.save_fit_button.setStyleSheet(
             "QPushButton {"
-            "background-color: rgba(0, 0, 0, 0);"
-            "color: rgb(195, 245, 255); border: 1px solid rgba(0, 220, 255, 185);"
-            "border-radius: 5px; padding: 1px 10px; font-size: 10px; font-weight: 600; }"
-            "QPushButton:hover { background-color: rgba(0, 210, 255, 38); border: 1px solid rgba(80, 235, 255, 230); color: white; }"
-            "QPushButton:pressed { background-color: rgba(0, 210, 255, 62); }"
+            f"background-color: rgba({br}, {bg_g}, {bb}, 210);"
+            f"color: rgba({tr}, {tg}, {tb}, 245);"
+            f"border: 1px solid rgba({r}, {g}, {b}, 190);"
+            "border-radius: 5px; padding: 1px 10px; font-family: '{APP_FONT_FAMILY}'; font-size: 10px; font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            f"background-color: rgba({hover_r}, {hover_g}, {hover_b}, 225);"
+            f"border: 1px solid rgba({r}, {g}, {b}, 235);"
+            f"color: rgba({tr}, {tg}, {tb}, 255);"
+            "}"
+            "QPushButton:pressed {"
+            f"background-color: rgba({pressed_r}, {pressed_g}, {pressed_b}, 235);"
+            "}"
         )
-        self.save_fit_button.hide()
 
     def _advance_loading_animation(self):
         if not self._loading:
@@ -521,7 +137,7 @@ class FittingPanelPopup(QFrame):
     def _copy_fit_to_clipboard(self):
         fit_data = self._fit_data if isinstance(self._fit_data, dict) else {}
         row_data = self._row_data if isinstance(self._row_data, dict) else {}
-        text = _build_eft_fit_text(fit_data, row_data)
+        text = build_eft_fit_text(fit_data, row_data)
         QApplication.clipboard().setText(text)
 
     def _type_name(self, type_id: int) -> str:
@@ -530,12 +146,13 @@ class FittingPanelPopup(QFrame):
         return str(type_names.get(int(type_id), f"Type {int(type_id)}"))
 
     def show_for_row(self, row_data: dict, owner_widget, pinned: bool = False):
-        killmail_id = _safe_int((row_data or {}).get("killmail_id"))
+        killmail_id = safe_int((row_data or {}).get("killmail_id"))
         if not killmail_id:
             self.hide()
             return
 
         self._row_data = dict(row_data or {})
+        self._owner_widget = owner_widget
         self._pinned = bool(pinned)
         self._mouse_inside = False
         self._request_id += 1
@@ -551,6 +168,7 @@ class FittingPanelPopup(QFrame):
         self._ship_pixmap = QPixmap()
         self._panel_pixmaps = {}
         self._apply_owner_visual_settings(owner_widget)
+        self._apply_save_fit_button_style()
         self._apply_circle_mask()
         self._layout_button()
         self._move_near_owner(owner_widget)
@@ -578,20 +196,23 @@ class FittingPanelPopup(QFrame):
         blur = getattr(window, "ui_blur", None)
         bg_color = getattr(window, "ui_bg_color", None)
         frame_color = getattr(window, "ui_frame_color", None)
+        text_color = getattr(window, "ui_text_color", None)
 
         if transparency is None or alpha is None:
             settings = load_ui_settings()
             transparency = settings.get("transparency", self._ui_transparency)
-            alpha = _transparency_to_alpha(int(transparency))
+            alpha = transparency_to_alpha(int(transparency))
             blur = settings.get("blur", self._ui_blur)
             bg_color = settings.get("bg_color", self._ui_bg_color)
             frame_color = settings.get("frame_color", self._ui_frame_color)
+            text_color = settings.get("text_color", self._ui_text_color)
 
         self._ui_transparency = max(0, min(100, int(transparency)))
         self._ui_alpha = max(0, min(255, int(alpha)))
         self._ui_blur = 1 if int(blur or 0) else 0
         self._ui_bg_color = str(bg_color or "#0b0b0b")
         self._ui_frame_color = str(frame_color or "#161616")
+        self._ui_text_color = str(text_color or "#d6d6d6")
 
     def _bg_rgb(self):
         color = QColor(self._ui_bg_color)
@@ -622,10 +243,29 @@ class FittingPanelPopup(QFrame):
         self._mouse_inside = False
         self._loading_timer.stop()
         self.hide()
+        self._owner_widget = None
 
     def enterEvent(self, event):
         self._mouse_inside = True
         super().enterEvent(event)
+
+    def _close_on_right_middle_event(self, event) -> bool:
+        if event.type() == QEvent.MouseButtonPress and event.button() in (Qt.RightButton, Qt.MiddleButton):
+            self.hide_panel(force=True)
+            self.mouseLeft.emit()
+            event.accept()
+            return True
+        return False
+
+    def eventFilter(self, obj, event):
+        if self._close_on_right_middle_event(event):
+            return True
+        return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event):
+        if self._close_on_right_middle_event(event):
+            return
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         pos = event.position()
@@ -648,24 +288,78 @@ class FittingPanelPopup(QFrame):
         self.mouseLeft.emit()
         super().leaveEvent(event)
 
-    def _move_near_owner(self, owner_widget):
-        window = owner_widget.window() if owner_widget else None
-        if window:
-            geo = window.frameGeometry()
-            pos = QPoint(geo.right() + 8, geo.top() - 18)
-        else:
-            pos = QApplication.instance().activeWindow().pos() if QApplication.instance().activeWindow() else QPoint(20, 20)
+    def follow_owner_position(self):
+        """Move visible popup together with the main window."""
+        if not self.isVisible():
+            return
+        owner_widget = self._owner_widget
+        if owner_widget is None:
+            return
+        try:
+            self._move_near_owner(owner_widget)
+        except RuntimeError:
+            # Owner widget was destroyed.
+            self._owner_widget = None
 
-        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
-        if screen:
-            available = screen.availableGeometry()
-            if pos.x() + self.width() > available.right():
-                pos.setX(max(available.left(), (window.frameGeometry().left() - self.width() - 8) if window else available.right() - self.width()))
-            if pos.y() < available.top():
-                pos.setY(available.top())
-            if pos.y() + self.height() > available.bottom():
-                pos.setY(max(available.top(), available.bottom() - self.height()))
-        self.move(pos)
+    def _move_near_owner(self, owner_widget):
+        """Place popup around the main app window.
+
+        Horizontal:
+          - main on left half of screen  -> popup opens to the right
+          - main on right half of screen -> popup opens to the left
+
+        Vertical:
+          - main on top half of screen    -> popup top aligns with main top
+          - main on bottom half of screen -> popup bottom aligns with main bottom
+        """
+        window = owner_widget.window() if owner_widget else None
+        app = QApplication.instance()
+
+        if not window:
+            active = app.activeWindow() if app else None
+            if active:
+                window = active
+
+        if not window:
+            self.move(QPoint(20, 20))
+            return
+
+        geo = window.frameGeometry()
+        screen = QApplication.screenAt(geo.center()) or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        gap = 8
+
+        if available:
+            screen_center_x = available.left() + available.width() / 2.0
+            screen_center_y = available.top() + available.height() / 2.0
+        else:
+            screen_center_x = geo.center().x()
+            screen_center_y = geo.center().y()
+
+        # Choose side by main window position on screen.
+        if geo.center().x() <= screen_center_x:
+            x = geo.right() + gap
+        else:
+            x = geo.left() - self.width() - gap
+
+        # Align to top or bottom of main window.
+        if geo.center().y() <= screen_center_y:
+            y = geo.top()
+        else:
+            y = geo.bottom() - self.height() + 1
+
+        if available:
+            # If chosen side is out of screen, flip to the opposite side.
+            if x + self.width() > available.right():
+                x = geo.left() - self.width() - gap
+            elif x < available.left():
+                x = geo.right() + gap
+
+            # Clamp as a final safety for very small screens/windows.
+            x = max(available.left(), min(x, available.right() - self.width() + 1))
+            y = max(available.top(), min(y, available.bottom() - self.height() + 1))
+
+        self.move(QPoint(int(x), int(y)))
 
     def _on_loaded(self, request_id: int, data: object):
         if request_id != self._request_id:
@@ -716,6 +410,16 @@ class FittingPanelPopup(QFrame):
         if thread is self._thread:
             self._thread = None
 
+    def _frame_color(self, alpha: int = 230) -> QColor:
+        color = QColor(self._ui_frame_color)
+        if not color.isValid():
+            color = QColor("#3D424A")
+        color.setAlpha(max(0, min(255, int(alpha))))
+        return color
+
+    def _frame_pen(self, alpha: int = 230, width: float = 1.0) -> QPen:
+        return QPen(self._frame_color(alpha), width)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -726,9 +430,8 @@ class FittingPanelPopup(QFrame):
         # Circular popup background uses the same transparency/bg/frame settings
         # as the main app, but never draws outside the round popup mask.
         bg = QColor(self._ui_bg_color)
-        frame = QColor(self._ui_frame_color)
         painter.save()
-        painter.setPen(QPen(QColor(frame.red(), frame.green(), frame.blue(), 115), 1))
+        painter.setPen(self._frame_pen(115, 1))
         painter.setBrush(QColor(bg.red(), bg.green(), bg.blue(), self._ui_alpha))
         painter.drawEllipse(QRectF(rect).adjusted(6, 6, -6, -6))
         painter.restore()
@@ -813,6 +516,8 @@ class FittingPanelPopup(QFrame):
         painter.setClipPath(path)
         if not self._ship_pixmap.isNull():
             painter.drawPixmap(target.toRect(), self._ship_pixmap)
+            # Darken the ship image by ~30% for better text readability.
+            painter.fillPath(path, QColor(0, 0, 0, 76))
         else:
             painter.fillRect(target, QColor(80, 40, 44, 85))
         painter.restore()
@@ -835,14 +540,14 @@ class FittingPanelPopup(QFrame):
         outer = QRectF(cx - outer_r, cy - outer_r, outer_r * 2, outer_r * 2)
         inner = QRectF(cx - inner_r, cy - inner_r, inner_r * 2, inner_r * 2)
 
-        # Transparent style: no fills inside the circles, only crisp outlines.
+        # All popup orbit/circle outlines follow global Options -> Frame color.
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor(225, 230, 230, 170), 1.6))
+        painter.setPen(self._frame_pen(205, 1.6))
         painter.drawEllipse(outer)
-        painter.setPen(QPen(QColor(170, 180, 180, 130), 1.2))
+        painter.setPen(self._frame_pen(165, 1.2))
         painter.drawEllipse(inner)
 
-        painter.setPen(QPen(QColor(180, 190, 190, 55), 0.9))
+        painter.setPen(self._frame_pen(85, 0.9))
         painter.drawEllipse(QRectF(cx - outer_r * 0.83, cy - outer_r * 0.83, outer_r * 1.66, outer_r * 1.66))
         painter.drawEllipse(QRectF(cx - outer_r * 0.62, cy - outer_r * 0.62, outer_r * 1.24, outer_r * 1.24))
         painter.restore()
@@ -860,7 +565,7 @@ class FittingPanelPopup(QFrame):
         painter.restore()
 
         painter.save()
-        painter.setPen(QPen(QColor(205, 215, 220, 140), 2))
+        painter.setPen(self._frame_pen(165, 2))
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(target)
         painter.restore()
@@ -925,8 +630,8 @@ class FittingPanelPopup(QFrame):
         for slot in ("high", "mid", "low"):
             slot_items = list(items.get(slot) or [])
             for row in slot_items:
-                slot_index = max(0, min(_safe_int(row.get("slot_index")), len(charge_pos[slot]) - 1))
-                charge_type_id = _safe_int(row.get("charge_type_id"))
+                slot_index = max(0, min(safe_int(row.get("slot_index")), len(charge_pos[slot]) - 1))
+                charge_type_id = safe_int(row.get("charge_type_id"))
                 if not charge_type_id:
                     continue
                 cx, cy = charge_pos[slot][slot_index]
@@ -950,9 +655,9 @@ class FittingPanelPopup(QFrame):
                 continue
             max_idx = len(module_pos[slot]) - 1
             for row in slot_items:
-                slot_index = max(0, min(_safe_int(row.get("slot_index")), max_idx))
+                slot_index = max(0, min(safe_int(row.get("slot_index")), max_idx))
                 x, y = module_pos[slot][slot_index]
-                type_id = _safe_int(row.get("type_id"))
+                type_id = safe_int(row.get("type_id"))
                 rect = self._draw_icon_at(painter, x, y, 32, type_id, border[slot])
                 self._hover_hitboxes.append((rect, self._type_name(type_id)))
 
@@ -998,7 +703,7 @@ class FittingPanelPopup(QFrame):
         if not isinstance(self._fit_data, dict):
             return
 
-        damage = _safe_int(self._fit_data.get("damage_taken"), 0)
+        damage = safe_int(self._fit_data.get("damage_taken"), 0)
         destroyed = self._fit_data.get("destroyed_value", 0)
         dropped = self._fit_data.get("dropped_value", 0)
         total = self._fit_data.get("total_value", 0)
@@ -1009,24 +714,39 @@ class FittingPanelPopup(QFrame):
             (f"Ship: {ship_name}", QColor("#ffffff")),
             (f"Location: {location_name}", QColor("#ffffff")),
             (f"Damage: {damage:,}".replace(",", " ") if damage > 0 else "Damage: -", QColor("#ffffff")),
-            (f"Destroyed: {_format_isk_short(destroyed)}", QColor("#ff3333")),
-            (f"Dropped: {_format_isk_short(dropped)}", QColor("#45d66f")),
-            (f"Total: {_format_isk_short(total)}", QColor("#22cc44")),
+            (f"Destroyed: {format_isk_short(destroyed)}", QColor("#ff3333")),
+            (f"Dropped: {format_isk_short(dropped)}", QColor("#45d66f")),
+            (f"Total: {format_isk_short(total)}", QColor("#22cc44")),
         ]
 
         painter.save()
         font = QFont(self.font())
-        font.setPointSize(8)
+        font.setPointSize(9)
         font.setBold(True)
         shadow = QColor(0, 0, 0, 190)
 
-        start_y = 122
-        row_h = 16
-        full_w = 220
+        start_y = 120
+        row_h = 17
+        full_w = 240
         x0 = 199 - full_w / 2
 
         def draw_center_line(rect, text, color):
             painter.setFont(font)
+
+            # Readability layer: small rounded background only under the text,
+            # not a full-width panel. It follows real text width + padding.
+            metrics = painter.fontMetrics()
+            text_w = min(rect.width() - 6, metrics.horizontalAdvance(text) + 14)
+            bg_rect = QRectF(
+                rect.center().x() - text_w / 2,
+                rect.y() + 1,
+                text_w,
+                rect.height() - 2,
+            )
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 118))
+            painter.drawRoundedRect(bg_rect, 4, 4)
+
             painter.setPen(shadow)
             for dx, dy in ((1, 1), (1, 0), (0, 1)):
                 painter.drawText(rect.translated(dx, dy), Qt.AlignHCenter | Qt.AlignVCenter, text)
@@ -1039,10 +759,22 @@ class FittingPanelPopup(QFrame):
 
         if self._hovered_module_name:
             hover_font = QFont(font)
-            hover_font.setPointSize(8)
+            hover_font.setPointSize(9)
             hover_font.setBold(True)
             painter.setFont(hover_font)
             hover_rect = QRectF(54, start_y + len(rows) * row_h + 2, 290, 22)
+            metrics = painter.fontMetrics()
+            hover_w = min(hover_rect.width() - 8, metrics.horizontalAdvance(self._hovered_module_name) + 16)
+            hover_bg = QRectF(
+                hover_rect.center().x() - hover_w / 2,
+                hover_rect.y() + 2,
+                hover_w,
+                hover_rect.height() - 4,
+            )
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 125))
+            painter.drawRoundedRect(hover_bg, 4, 4)
+
             painter.setPen(shadow)
             for dx, dy in ((1, 1), (1, 0), (0, 1)):
                 painter.drawText(hover_rect.translated(dx, dy), Qt.AlignHCenter | Qt.AlignVCenter, self._hovered_module_name)

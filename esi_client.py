@@ -1,6 +1,5 @@
-import requests
-
 from cache import cache
+from app_http_client import get_json, post_json
 
 
 ESI_URL = "https://esi.evetech.net/latest"
@@ -11,12 +10,6 @@ TTL_CHARACTER_ID = 7 * 24 * 3600
 TTL_CHARACTER_INFO = 6 * 3600
 TTL_CORP_ALLIANCE_INFO = 24 * 3600
 
-
-def _headers():
-    return {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-    }
 
 
 def get_character_id(character_name: str):
@@ -32,17 +25,16 @@ def get_character_id(character_name: str):
         return cached
 
     try:
-        response = requests.post(
+        data = post_json(
             f"{ESI_URL}/universe/ids/",
-            json=[name],
-            headers=_headers(),
+            [name],
+            user_agent=USER_AGENT,
             timeout=TIMEOUT,
+            retries=1,
         )
 
-        if response.status_code != 200:
+        if not isinstance(data, dict):
             return None
-
-        data = response.json()
         characters = data.get("characters", [])
 
         if not characters:
@@ -70,16 +62,15 @@ def get_character_info(character_id: int):
         return cached
 
     try:
-        response = requests.get(
+        data = get_json(
             f"{ESI_URL}/characters/{character_id}/",
-            headers=_headers(),
+            user_agent=USER_AGENT,
             timeout=TIMEOUT,
+            retries=1,
         )
 
-        if response.status_code != 200:
+        if not isinstance(data, dict):
             return None
-
-        data = response.json()
         cache.set(cache_key, data)
         return data
 
@@ -100,16 +91,15 @@ def get_corporation_info(corp_id: int):
         return cached
 
     try:
-        response = requests.get(
+        data = get_json(
             f"{ESI_URL}/corporations/{corp_id}/",
-            headers=_headers(),
+            user_agent=USER_AGENT,
             timeout=TIMEOUT,
+            retries=1,
         )
 
-        if response.status_code != 200:
+        if not isinstance(data, dict):
             return None
-
-        data = response.json()
         cache.set(cache_key, data)
         return data
 
@@ -130,16 +120,15 @@ def get_alliance_info(alliance_id: int):
         return cached
 
     try:
-        response = requests.get(
+        data = get_json(
             f"{ESI_URL}/alliances/{alliance_id}/",
-            headers=_headers(),
+            user_agent=USER_AGENT,
             timeout=TIMEOUT,
+            retries=1,
         )
 
-        if response.status_code != 200:
+        if not isinstance(data, dict):
             return None
-
-        data = response.json()
         cache.set(cache_key, data)
         return data
 

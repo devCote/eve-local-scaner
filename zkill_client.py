@@ -8,10 +8,10 @@ requests for cyno scanning.
 """
 
 import json
-import requests
 from datetime import datetime, timezone, timedelta
 
 from cache import cache
+from app_http_client import get_json
 from local_intel_db import (
     get_recent_kills as get_local_recent_kills,
     get_recent_losses as get_local_recent_losses,
@@ -44,13 +44,7 @@ def get_json_cached(cache_key: str, url: str, ttl_seconds: int):
         return cached
 
     try:
-        response = requests.get(
-            url,
-            headers={"User-Agent": USER_AGENT},
-            timeout=TIMEOUT,
-        )
-        response.raise_for_status()
-        data = response.json()
+        data = get_json(url, user_agent=USER_AGENT, timeout=TIMEOUT, retries=1)
         cache.set(cache_key, data)
         return data
     except Exception as e:

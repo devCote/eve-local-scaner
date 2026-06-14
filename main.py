@@ -1,24 +1,6 @@
-import os
 import sys
 import traceback
 import sqlite3
-
-# QtWebEngine browser was removed from the zKill panel.
-# Do not force software OpenGL/SwiftShader globally: it can make normal Qt widgets
-# and table repainting feel slower. Keep the old flags only for emergency testing:
-# set ELS_ENABLE_QTWEBENGINE_FLAGS=1 before starting the app.
-if os.environ.get("ELS_ENABLE_QTWEBENGINE_FLAGS") == "1":
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-        "--disable-gpu "
-        "--disable-gpu-compositing "
-        "--disable-gpu-rasterization "
-        "--disable-accelerated-2d-canvas "
-        "--disable-accelerated-video-decode "
-        "--disable-dev-shm-usage "
-        "--use-angle=swiftshader "
-        "--no-sandbox"
-    )
-    os.environ["QT_OPENGL"] = "software"
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QLockFile
 from PySide6.QtGui import QIcon
@@ -37,6 +19,7 @@ from local_intel_updater import ensure_local_intel_ready
 from local_intel_db import get_db_path
 from logger_setup import setup_file_logging
 from crash_handler import install_crash_handler
+from app_fonts import make_app_font, resolve_app_font_family
 
 
 def set_windows_app_id():
@@ -92,7 +75,6 @@ class StartupUpdateWindow(QWidget):
             QWidget {
                 background-color: #0b0b0b;
                 color: #d6d6d6;
-                font-family: "Segoe UI";
                 font-size: 10pt;
                 border: 1px solid #161616;
             }
@@ -199,6 +181,8 @@ def main() -> int:
     ensure_user_data_dirs()
 
     app = QApplication(sys.argv)
+    app.setFont(make_app_font(10))
+    resolve_app_font_family()
 
     app_icon = get_app_icon()
     if not app_icon.isNull():
@@ -238,8 +222,7 @@ def main() -> int:
             app.processEvents()
 
             # IMPORTANT: import UI only after DB updater is done.
-            # This prevents the app from skipping startup DB update
-            # and keeps QtWebEngine lazy.
+            # This prevents the app from skipping startup DB update.
             from ui import EveLocalScanner
 
             window = EveLocalScanner()

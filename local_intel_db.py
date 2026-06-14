@@ -49,6 +49,14 @@ def connect() -> sqlite3.Connection | None:
 
     _db_connection = sqlite3.connect(str(db_path), timeout=10, check_same_thread=False)
     _db_connection.row_factory = sqlite3.Row
+    try:
+        cur = _db_connection.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA busy_timeout=10000")
+        cur.execute("PRAGMA temp_store=MEMORY")
+    except Exception:
+        pass
     return _db_connection
 
 

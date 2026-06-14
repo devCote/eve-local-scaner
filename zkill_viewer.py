@@ -11,15 +11,13 @@ from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import QLabel, QFrame, QGridLayout, QHBoxLayout, QTabWidget, QVBoxLayout, QWidget, QSizePolicy
 
 from zkill_client import (
-    get_danger_percent,
-    get_gangRatio,
     get_recent_kills,
     get_recent_losses,
-    get_soloRatio,
     get_zkill_stats,
 )
 from zkill_compact_table import KillsLossesTable
 from zkill_fit_popup import FittingPanelPopup
+from app_fonts import APP_FONT_FAMILY
 from esi_client import TTL_CHARACTER_INFO, TTL_CORP_ALLIANCE_INFO
 
 from zkill_table_model import (
@@ -120,6 +118,7 @@ class ZKillViewer(QWidget):
         self._font_size = max(7, self.font().pointSize() or 10)
         self._text_color = "#D6D8DC"
         self._frame_color = "#3D424A"
+        self._compact_zkill = False
         self._fit_popup = FittingPanelPopup(self)
         self._fit_hover_timer = QTimer(self)
         self._fit_hover_timer.setSingleShot(True)
@@ -132,6 +131,7 @@ class ZKillViewer(QWidget):
         root.setSpacing(1)
 
         header_frame = QFrame()
+        self.header_frame = header_frame
         header_frame.setObjectName("ZkillHeader")
         header_layout = QHBoxLayout(header_frame)
         header_layout.setContentsMargins(0, 0, 0, 0)
@@ -169,18 +169,26 @@ class ZKillViewer(QWidget):
         def add_row(row: int, label: str, widget: QLabel, muted: bool = False):
             key = QLabel(label)
             key.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            widget.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+            # Keep both sides as simple plain QLabel text. TextSelectableByMouse
+            # creates an internal text control on Windows/Qt and its baseline
+            # can sit a few pixels higher than the left label.
+            key.setTextFormat(Qt.PlainText)
+            widget.setTextFormat(Qt.PlainText)
+            widget.setTextInteractionFlags(Qt.NoTextInteraction)
+
             key.setMinimumWidth(64)
             key.setContentsMargins(0, 0, 0, 0)
             widget.setContentsMargins(0, 0, 0, 0)
-            widget.setTextInteractionFlags(Qt.TextSelectableByMouse)
             key.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             key.setProperty("zkill_label_role", "key")
             widget.setProperty("zkill_label_role", "muted" if muted else "value")
             self.info_key_labels.append(key)
             self.info_value_labels.append(widget)
-            info_layout.addWidget(key, row, 0)
-            info_layout.addWidget(widget, row, 1)
+            info_layout.addWidget(key, row, 0, Qt.AlignRight | Qt.AlignVCenter)
+            info_layout.addWidget(widget, row, 1, Qt.AlignLeft | Qt.AlignVCenter)
 
         add_row(0, "Character:", self.name_value)
         add_row(1, "Corporation:", self.corp_value)
@@ -204,7 +212,8 @@ class ZKillViewer(QWidget):
         for table in (self.overview_table, self.kills_table, self.losses_table):
             table.killmailActivated.connect(self.show_killmail_id)
             table.columnWidthsChanged.connect(self._sync_zkill_column_widths)
-            # Popup opens only by click, not hover.
+            table.popupCloseRequested.connect(self.close_fit_popup)
+            # Popup opens only by left click, from any cell in the row.
             table.shipClicked.connect(self._on_ship_clicked)
 
         self.tabs.addTab(self.overview_table, "All")
@@ -221,6 +230,13 @@ class ZKillViewer(QWidget):
         """)
         self.apply_ui_settings(self._font_size, self._text_color)
 
+    def set_compact_zkill(self, enabled: bool):
+        """Hide zKill avatar/header and keep only the table when enabled."""
+        self._compact_zkill = bool(enabled)
+        if hasattr(self, "header_frame"):
+            self.header_frame.setVisible(not self._compact_zkill)
+        self.updateGeometry()
+
     def set_mode(self, mode: str):
         """Switch the external zKill mode buttons: All / Kill / Loss."""
         mode = str(mode or "All").strip().lower()
@@ -235,13 +251,17 @@ class ZKillViewer(QWidget):
         if hasattr(self, "_fit_popup"):
             self._fit_popup.hide_panel(force=True)
 
+    def reposition_fit_popup(self):
+        if hasattr(self, "_fit_popup"):
+            self._fit_popup.follow_owner_position()
+
 
     def _on_ship_hovered(self, row_data: dict):
         """Deprecated: popup no longer opens on hover."""
         return
 
     def _on_ship_clicked(self, row_data: dict):
-        """Open and pin fitting popup by clicking a ship cell."""
+        """Open and pin fitting popup by clicking any cell in a kill/loss row."""
         row_data = dict(row_data or {})
         if not row_data.get("killmail_id"):
             return
@@ -266,25 +286,34 @@ class ZKillViewer(QWidget):
 
     def _apply_header_label_styles(self):
         size = int(self._font_size)
+        text_color = str(self._text_color or "#D6D8DC")
+        identity_color = "#A9F5E0"  # same cyan as active top buttons
+
         key_style = (
-            f"color: #BEC5CE; font-weight: bold; background: transparent; "
-            f"font-size: {size}pt;"
+            f"color: {text_color}; font-weight: bold; background: transparent; "
+            f"font-family: '{APP_FONT_FAMILY}'; font-size: {size}pt; "
+            "padding: 0px; margin: 0px;"
         )
-        value_style = (
-            f"color: #A9F5E0; background: transparent; "
-            f"font-size: {size}pt;"
+        default_value_style = (
+            f"color: {text_color}; background: transparent; "
+            f"font-family: '{APP_FONT_FAMILY}'; font-size: {size}pt; "
+            "padding: 0px; margin: 0px;"
         )
-        muted_style = (
-            f"color: #BFC5CC; background: transparent; "
-            f"font-size: {size}pt;"
+        identity_value_style = (
+            f"color: {identity_color}; background: transparent; "
+            f"font-family: '{APP_FONT_FAMILY}'; font-size: {size}pt; "
+            "padding: 0px; margin: 0px;"
         )
 
+        # Labels on the left (Character:, Corporation:, Alliance:) stay normal Text color.
         for label in getattr(self, "info_key_labels", []):
             label.setStyleSheet(key_style)
 
-        for label in getattr(self, "info_value_labels", []):
-            role = label.property("zkill_label_role")
-            label.setStyleSheet(muted_style if role == "muted" else value_style)
+        for index, label in enumerate(getattr(self, "info_value_labels", [])):
+            # Only values on the right are cyan:
+            # 0 = character name, 1 = corporation name, 2 = alliance name.
+            # Sec / Birthday remains controlled by global Text color.
+            label.setStyleSheet(identity_value_style if index in (0, 1, 2) else default_value_style)
 
 
     def _update_header_metrics(self):
@@ -297,6 +326,11 @@ class ZKillViewer(QWidget):
             label.setFixedHeight(row_h)
             label.setMinimumHeight(row_h)
             label.setMaximumHeight(row_h)
+            label.setContentsMargins(0, 0, 0, 0)
+            if label in getattr(self, "info_key_labels", []):
+                label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            else:
+                label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         # Avatar follows the 4-line header block instead of staying hard-coded.
         avatar_size = max(48, min(92, row_h * 4))
@@ -321,16 +355,16 @@ class ZKillViewer(QWidget):
             }}
             QTabBar::tab {{
                 background-color: rgba(14, 16, 20, 120);
-                color: #AEB4BC;
+                color: {self._text_color};
                 padding: 3px 9px;
                 margin: 0px;
                 border: 1px solid transparent;
                 border-bottom: 1px solid rgba(55, 67, 80, 120);
-                font-size: {self._font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self._font_size}pt;
             }}
             QTabBar::tab:selected {{
                 background-color: rgba(18, 24, 26, 210);
-                color: #A9F5E0;
+                color: {self._text_color};
                 border-bottom: 1px solid #39C7B5;
             }}
             QTabBar::tab:hover {{
@@ -339,28 +373,39 @@ class ZKillViewer(QWidget):
             }}
         """)
 
-    def apply_ui_settings(self, font_size: int | None = None, text_color: str | None = None, frame_color: str | None = None):
+    def apply_ui_settings(
+        self,
+        font_size: int | None = None,
+        text_color: str | None = None,
+        frame_color: str | None = None,
+        compact_zkill: int | bool | None = None,
+    ):
         """Apply global Options font size/color/frame color to the zKill tab."""
         if font_size is not None:
             try:
-                self._font_size = max(7, min(18, int(font_size)))
+                self._font_size = max(7, min(11, int(font_size)))
             except Exception:
                 self._font_size = max(7, self._font_size)
         if text_color:
             self._text_color = str(text_color)
         if frame_color:
             self._frame_color = str(frame_color)
+        if compact_zkill is not None:
+            self.set_compact_zkill(bool(compact_zkill))
 
         font = self.font()
+        font.setFamily(APP_FONT_FAMILY)
         font.setPointSize(int(self._font_size))
         self.setFont(font)
 
         for label in self.findChildren(QLabel):
             label_font = label.font()
+            label_font.setFamily(APP_FONT_FAMILY)
             label_font.setPointSize(int(self._font_size))
             label.setFont(label_font)
 
         name_font = self.name_value.font()
+        name_font.setFamily(APP_FONT_FAMILY)
         name_font.setPointSize(int(self._font_size))
         name_font.setBold(True)
         self.name_value.setFont(name_font)
@@ -369,6 +414,7 @@ class ZKillViewer(QWidget):
         self._update_header_metrics()
 
         tab_font = self.tabs.font()
+        tab_font.setFamily(APP_FONT_FAMILY)
         tab_font.setPointSize(int(self._font_size))
         self.tabs.setFont(tab_font)
         self.tabs.tabBar().setFont(tab_font)
@@ -446,6 +492,10 @@ class ZKillViewer(QWidget):
         if not character_id:
             self.show_message("Invalid character id.")
             return
+
+        # Every newly opened pilot must start from All, regardless of the
+        # previous Zkill mode selected for another pilot.
+        self.set_mode("All")
 
         self.character_id = character_id
         self.character_name = character_name or "Unknown"

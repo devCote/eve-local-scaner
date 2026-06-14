@@ -87,7 +87,7 @@ class IntelTable(QTableWidget):
             bar = self.horizontalScrollBar()
             if bar.value() != 0:
                 bar.setValue(0)
-            self.viewport().update()
+                self.viewport().update()
         except Exception:
             pass
 
@@ -137,12 +137,14 @@ class IntelTable(QTableWidget):
 
                 if index.isValid():
                     row = index.row()
-                    self.last_hover_row = row
-                    self.rowHovered.emit(row)
+                    if row != self.last_hover_row:
+                        self.last_hover_row = row
+                        self.rowHovered.emit(row)
 
             elif event.type() == QEvent.Leave:
-                self.last_hover_row = None
-                self.mouseLeft.emit()
+                if self.last_hover_row is not None:
+                    self.last_hover_row = None
+                    self.mouseLeft.emit()
 
         if obj == self.viewport():
             self._lock_horizontal_offset()
@@ -155,15 +157,17 @@ class IntelTable(QTableWidget):
 
         if index.isValid():
             row = index.row()
-            self.last_hover_row = row
-            self.rowHovered.emit(row)
+            if row != self.last_hover_row:
+                self.last_hover_row = row
+                self.rowHovered.emit(row)
 
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
         self._lock_horizontal_offset()
-        self.last_hover_row = None
-        self.mouseLeft.emit()
+        if self.last_hover_row is not None:
+            self.last_hover_row = None
+            self.mouseLeft.emit()
         super().leaveEvent(event)
 
     def get_event_pos(self, event):

@@ -32,6 +32,18 @@ CYNO_MODULES = {
     52694: "Industrial Cynosural Field Generator",
 }
 
+IMPORT_INDEXES = {
+    "idx_killmails_time": "CREATE INDEX IF NOT EXISTS idx_killmails_time ON killmails(killmail_time DESC)",
+    "idx_killmails_victim_time": "CREATE INDEX IF NOT EXISTS idx_killmails_victim_time ON killmails(victim_character_id, killmail_time DESC)",
+    "idx_attackers_character_killmail": "CREATE INDEX IF NOT EXISTS idx_attackers_character_killmail ON killmail_attackers(attacker_character_id, killmail_id)",
+    "idx_attackers_killmail": "CREATE INDEX IF NOT EXISTS idx_attackers_killmail ON killmail_attackers(killmail_id)",
+    "idx_cyno_losses_time": "CREATE INDEX IF NOT EXISTS idx_cyno_losses_time ON cyno_losses(last_cyno_time)",
+}
+
+BULK_KILLMAIL_CHUNK = 5000
+BULK_ATTACKER_CHUNK = 25000
+BULK_CYNO_CHUNK = 2500
+
 ProgressCallback = Callable[[str, int | None, int | None], None]
 
 
@@ -268,7 +280,41 @@ def rebuild_schema(conn: sqlite3.Connection, progress_callback: ProgressCallback
     conn.commit()
 
 
-def create_schema(conn: sqlite3.Connection):
+def apply_sqlite_pragmas(conn: sqlite3.Connection, fast_import: bool = False) -> None:
+    """SQLite settings for faster local DB startup/import.
+
+    WAL + NORMAL keeps normal app usage safe and responsive. During archive
+    import we temporarily switch synchronous=OFF because the DB can be rebuilt
+    from downloaded archives if Windows/app crashes mid-import.
+    """
+    cur = conn.cursor()
+    try:
+        cur.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
+
+    try:
+        cur.execute("PRAGMA synchronous=OFF" if fast_import else "PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA temp_store=MEMORY")
+        cur.execute("PRAGMA cache_size=-200000")
+        cur.execute("PRAGMA busy_timeout=60000")
+    except Exception:
+        pass
+
+
+def create_indexes(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    for sql in IMPORT_INDEXES.values():
+        cur.execute(sql)
+
+
+def drop_import_indexes(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    for index_name in IMPORT_INDEXES:
+        cur.execute(f"DROP INDEX IF EXISTS {index_name}")
+
+
+def create_schema(conn: sqlite3.Connection, create_indexes_now: bool = True):
     cur = conn.cursor()
 
     # One row per killmail. Victim/system/time are no longer repeated for every attacker.
@@ -314,38 +360,16 @@ def create_schema(conn: sqlite3.Connection):
         )
     """)
 
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_killmails_time
-        ON killmails(killmail_time DESC)
-    """)
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_killmails_victim_time
-        ON killmails(victim_character_id, killmail_time DESC)
-    """)
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_attackers_character_killmail
-        ON killmail_attackers(attacker_character_id, killmail_id)
-    """)
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_attackers_killmail
-        ON killmail_attackers(killmail_id)
-    """)
-
-    cur.execute("""
-        CREATE INDEX IF NOT EXISTS idx_cyno_losses_time
-        ON cyno_losses(last_cyno_time)
-    """)
+    if create_indexes_now:
+        create_indexes(conn)
 
     cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-
 
 def init_db(progress_callback: ProgressCallback | None = None) -> sqlite3.Connection:
     ensure_folders()
 
     conn = sqlite3.connect(str(DB_PATH), timeout=60)
+    apply_sqlite_pragmas(conn, fast_import=False)
     
     try:
         cur = conn.cursor()
@@ -401,6 +425,159 @@ def find_victim_cyno_module(killmail: dict[str, Any]):
             return found
 
     return None
+
+
+def killmail_row_from_json(killmail: dict[str, Any]) -> tuple | None:
+    killmail_id = killmail.get("killmail_id")
+    killmail_time = killmail.get("killmail_time")
+    solar_system_id = killmail.get("solar_system_id")
+
+    victim = killmail.get("victim", {}) or {}
+    victim_character_id = victim.get("character_id")
+    victim_ship_type_id = victim.get("ship_type_id")
+
+    if not killmail_id or not killmail_time:
+        return None
+
+    return (
+        int(killmail_id),
+        killmail_time,
+        victim_character_id,
+        victim_ship_type_id,
+        solar_system_id,
+    )
+
+
+def attacker_rows_from_json(killmail: dict[str, Any]) -> list[tuple]:
+    killmail_id = killmail.get("killmail_id")
+    if not killmail_id:
+        return []
+
+    rows = []
+    for attacker in killmail.get("attackers", []) or []:
+        attacker_character_id = attacker.get("character_id")
+        if not attacker_character_id:
+            continue
+
+        rows.append((
+            int(killmail_id),
+            int(attacker_character_id),
+            1 if attacker.get("final_blow") else 0,
+            int(attacker.get("damage_done") or 0),
+        ))
+
+    return rows
+
+
+def cyno_loss_row_from_json(killmail: dict[str, Any], module_id: int) -> tuple | None:
+    victim = killmail.get("victim", {}) or {}
+    character_id = victim.get("character_id")
+    killmail_id = killmail.get("killmail_id")
+    killmail_time = killmail.get("killmail_time")
+
+    if not character_id or not killmail_id or not killmail_time:
+        return None
+
+    ship_type_id = victim.get("ship_type_id")
+    module_name = CYNO_MODULES.get(int(module_id), str(module_id))
+
+    return (
+        int(character_id),
+        killmail_time,
+        int(killmail_id),
+        ship_type_id,
+        int(module_id),
+        module_name,
+    )
+
+
+def _executemany_chunked(cur: sqlite3.Cursor, sql: str, rows: list[tuple], chunk_size: int) -> None:
+    if not rows:
+        return
+
+    chunk_size = max(1, int(chunk_size))
+    for start in range(0, len(rows), chunk_size):
+        cur.executemany(sql, rows[start:start + chunk_size])
+
+
+def save_killmail_rows(conn: sqlite3.Connection, rows: list[tuple]) -> int:
+    if not rows:
+        return 0
+
+    cur = conn.cursor()
+    _executemany_chunked(cur, """
+        INSERT OR IGNORE INTO killmails (
+            killmail_id,
+            killmail_time,
+            victim_character_id,
+            victim_ship_type_id,
+            solar_system_id
+        )
+        VALUES (?, ?, ?, ?, ?)
+    """, rows, BULK_KILLMAIL_CHUNK)
+    return len(rows)
+
+
+def save_attacker_rows_bulk(conn: sqlite3.Connection, rows: list[tuple]) -> int:
+    if not rows:
+        return 0
+
+    cur = conn.cursor()
+    _executemany_chunked(cur, """
+        INSERT OR IGNORE INTO killmail_attackers (
+            killmail_id,
+            attacker_character_id,
+            final_blow,
+            damage_done
+        )
+        VALUES (?, ?, ?, ?)
+    """, rows, BULK_ATTACKER_CHUNK)
+    return len(rows)
+
+
+def save_cyno_loss_rows(conn: sqlite3.Connection, rows: list[tuple]) -> int:
+    if not rows:
+        return 0
+
+    cur = conn.cursor()
+    _executemany_chunked(cur, """
+        INSERT INTO cyno_losses (
+            character_id,
+            last_cyno_time,
+            killmail_id,
+            ship_type_id,
+            cyno_module_id,
+            cyno_module_name
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(character_id) DO UPDATE SET
+            last_cyno_time = CASE
+                WHEN excluded.last_cyno_time > cyno_losses.last_cyno_time
+                THEN excluded.last_cyno_time
+                ELSE cyno_losses.last_cyno_time
+            END,
+            killmail_id = CASE
+                WHEN excluded.last_cyno_time > cyno_losses.last_cyno_time
+                THEN excluded.killmail_id
+                ELSE cyno_losses.killmail_id
+            END,
+            ship_type_id = CASE
+                WHEN excluded.last_cyno_time > cyno_losses.last_cyno_time
+                THEN excluded.ship_type_id
+                ELSE cyno_losses.ship_type_id
+            END,
+            cyno_module_id = CASE
+                WHEN excluded.last_cyno_time > cyno_losses.last_cyno_time
+                THEN excluded.cyno_module_id
+                ELSE cyno_losses.cyno_module_id
+            END,
+            cyno_module_name = CASE
+                WHEN excluded.last_cyno_time > cyno_losses.last_cyno_time
+                THEN excluded.cyno_module_name
+                ELSE cyno_losses.cyno_module_name
+            END
+    """, rows, BULK_CYNO_CHUNK)
+    return len(rows)
 
 
 def save_killmail(conn: sqlite3.Connection, killmail: dict[str, Any]) -> bool:
@@ -572,15 +749,19 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
     report(progress_callback, f"[LOCAL DB] processing: {archive_path.name}", current, total)
 
     json_count = 0
-    attacker_rows = 0
     cyno_count = 0
+    killmail_rows: list[tuple] = []
+    attacker_rows: list[tuple] = []
+    cyno_rows: list[tuple] = []
 
     try:
         with tarfile.open(archive_path, "r:bz2") as tar:
-            members = [m for m in tar if m.isfile() and m.name.endswith(".json")]
-            member_total = len(members)
+            # Stream the archive once. Avoid per-killmail SQLite writes; collect
+            # rows in memory and insert them with executemany below.
+            for member in tar:
+                if not member.isfile() or not member.name.endswith(".json"):
+                    continue
 
-            for index, member in enumerate(members, start=1):
                 file_obj = tar.extractfile(member)
                 if not file_obj:
                     continue
@@ -590,35 +771,45 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
                 except Exception:
                     continue
 
-                if not save_killmail(conn, killmail):
+                row = killmail_row_from_json(killmail)
+                if not row:
                     continue
 
                 json_count += 1
-                attacker_rows += save_attackers(conn, killmail)
+                killmail_rows.append(row)
+                attacker_rows.extend(attacker_rows_from_json(killmail))
 
                 module_id = find_victim_cyno_module(killmail)
                 if module_id:
-                    if save_cyno_loss(conn, killmail, int(module_id)):
+                    cyno_row = cyno_loss_row_from_json(killmail, int(module_id))
+                    if cyno_row:
+                        cyno_rows.append(cyno_row)
                         cyno_count += 1
 
-                if index % 25 == 0 or index == member_total:
+                if progress_callback and json_count % 1000 == 0:
                     report(
                         progress_callback,
-                        f"[LOCAL DB] processing {archive_path.name}: {index}/{member_total}",
+                        f"[LOCAL DB] parsing {archive_path.name}: {json_count}",
                         current,
                         total,
                     )
+
+        # One SQLite write batch per archive instead of thousands of individual
+        # inserts. This is the main speedup for first launch DB creation.
+        save_killmail_rows(conn, killmail_rows)
+        attacker_count = save_attacker_rows_bulk(conn, attacker_rows)
+        save_cyno_loss_rows(conn, cyno_rows)
 
         mark_archive_processed(
             conn=conn,
             archive_name=archive_path.name,
             json_count=json_count,
-            attacker_rows=attacker_rows,
+            attacker_rows=attacker_count,
             cyno_count=cyno_count,
         )
 
         conn.commit()
-        
+
         # Delete archive file after successful processing to free disk space
         try:
             archive_path.unlink()
@@ -630,10 +821,10 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
             )
         except Exception as e:
             report(progress_callback, f"[LOCAL DB] delete archive error {archive_path.name}: {e}", current, total)
-        
+
         report(
             progress_callback,
-            f"[LOCAL DB] ok: {archive_path.name} json={json_count} attackers={attacker_rows} cynos={cyno_count}",
+            f"[LOCAL DB] ok: {archive_path.name} json={json_count} attackers={attacker_count} cynos={cyno_count}",
             current,
             total,
         )
@@ -643,7 +834,6 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
         conn.rollback()
         report(progress_callback, f"[LOCAL DB] process error {archive_path.name}: {e}", current, total)
         return False
-
 
 def cleanup_old_archives(required_names: set[str], progress_callback: ProgressCallback | None = None) -> int:
     removed = 0
@@ -878,6 +1068,15 @@ def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: Prog
         else:
             report(progress_callback, "[3/4] No new archives to add to SQLite.", 80, 100)
 
+        defer_indexes = len(unprocessed_archives) >= 2
+
+        if unprocessed_archives:
+            apply_sqlite_pragmas(conn, fast_import=True)
+            if defer_indexes:
+                report(progress_callback, "[3/4] Fast import mode: rebuilding indexes after import...", 51, 100)
+                drop_import_indexes(conn)
+                conn.commit()
+
         # Processing uses 52-88%
         for index, archive_path in enumerate(unprocessed_archives, start=1):
             percent = 52 + int((index - 1) / process_total * 36)
@@ -889,10 +1088,16 @@ def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: Prog
             percent = 52 + int(index / process_total * 36)
             report(progress_callback, f"[3/4] Added to SQLite {index}/{len(unprocessed_archives)}", percent, 100)
 
-        # Phase 4: compact only if changed. Keep under 100 until really finished.
+        # Phase 4: optimize only if changed. Keep under 100 until really finished.
         if downloaded or processed_archives:
             report(progress_callback, "[4/4] Optimizing SQLite database...", 92, 100)
-            compact_database(conn, progress_callback=None)
+            if defer_indexes:
+                create_indexes(conn)
+                conn.commit()
+            apply_sqlite_pragmas(conn, fast_import=False)
+            cur = conn.cursor()
+            cur.execute("PRAGMA optimize")
+            conn.commit()
 
         report(
             progress_callback,

@@ -11,6 +11,7 @@ DEFAULT_UI_SETTINGS: dict[str, Any] = {
     "transparency": 10,
     "blur": 0,
     "font_size": 10,
+    "compact_zkill": 0,
     "frame_color": "#161616",
     "text_color": "#d6d6d6",
     "bg_color": "#0b0b0b",
@@ -124,8 +125,9 @@ def normalize_ui_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
             raw.get("font_size", defaults["font_size"]),
             defaults["font_size"],
             8,
-            14,
+            11,
         ),
+        "compact_zkill": 1 if bool(raw.get("compact_zkill", defaults["compact_zkill"])) else 0,
         "frame_color": normalize_color(
             raw.get("frame_color", defaults["frame_color"]),
             defaults["frame_color"],

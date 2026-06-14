@@ -5,11 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 import sqlite3
-from pathlib import Path
-
-import requests
-
 from cache import cache
+from app_http_client import get_bytes, get_json, post_json
 from paths import user_data_path
 from ship_names import get_ship_name as get_local_ship_name
 from zkill_client import ESI_URL, USER_AGENT, get_full_killmail
@@ -37,9 +34,7 @@ def _cached_json(cache_key: str, url: str, ttl_seconds: int = TTL_ESI):
         return cached
 
     try:
-        response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
+        data = get_json(url, user_agent=USER_AGENT, timeout=TIMEOUT, retries=1)
         cache.set(cache_key, data)
         return data
     except Exception as exc:
@@ -48,18 +43,31 @@ def _cached_json(cache_key: str, url: str, ttl_seconds: int = TTL_ESI):
 
 
 def get_type_name(type_id: int) -> str:
+    """Resolve any EVE inventory type: ship, module, deployable, structure, etc."""
     type_id = _safe_int(type_id)
     if not type_id:
         return "Unknown"
 
     cache_key = f"esi:type-name:{type_id}"
-    cached = cache.get(cache_key, ttl_seconds=TTL_ESI)
-    if cached is not None:
-        return str(cached)
+    alt_cache_key = f"esi:type_name:{type_id}"
+
+    for key in (cache_key, alt_cache_key):
+        cached = cache.get(key, ttl_seconds=TTL_ESI)
+        if cached is not None:
+            cached_text = str(cached).strip()
+            # Old cache could contain fallback "Type 33475". Retry those once
+            # because structures/deployables need the direct type endpoint.
+            if cached_text and not cached_text.lower().startswith("type "):
+                return cached_text
 
     data = _cached_json(cache_key + ":json", f"{ESI_URL}/universe/types/{type_id}/")
-    name = (data or {}).get("name") or f"Type {type_id}"
+    name = str((data or {}).get("name") or "").strip()
+
+    if not name:
+        name = f"Type {type_id}"
+
     cache.set(cache_key, name)
+    cache.set(alt_cache_key, name)
     return name
 
 
@@ -86,11 +94,25 @@ def shorten_ship_name(name: str) -> str:
 
 
 def get_ship_name(type_id: int) -> str:
-    """Fast ship name lookup from local ships.json, no ESI request per row."""
+    """Name for the Ship column.
+
+    First use local ships.json for speed. If it returns "Type ####", the victim
+    is likely a structure/deployable/non-ship missing from ships.json, so fall
+    back to ESI /universe/types/{type_id}/ and show the real type name.
+    """
     type_id = _safe_int(type_id)
     if not type_id:
         return "Unknown"
-    return shorten_ship_name(get_local_ship_name(type_id))
+
+    local_name = shorten_ship_name(get_local_ship_name(type_id))
+    if local_name and not local_name.lower().startswith("type "):
+        return local_name
+
+    resolved_name = shorten_ship_name(get_type_name(type_id))
+    if resolved_name and not resolved_name.lower().startswith("type "):
+        return resolved_name
+
+    return local_name or f"Type {type_id}"
 
 
 def get_character_name(character_id: int) -> str:
@@ -208,9 +230,7 @@ def get_character_avatar_bytes(character_id: int, size: int = 128) -> bytes:
 
     try:
         url = f"https://images.evetech.net/characters/{character_id}/portrait?size={size}"
-        response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-        response.raise_for_status()
-        content = response.content or b""
+        content = get_bytes(url, user_agent=USER_AGENT, timeout=TIMEOUT, retries=1)
         if content:
             try:
                 avatar_path.write_bytes(content)
@@ -401,14 +421,14 @@ def _bulk_resolve_names(ids: set[int]) -> dict[int, str]:
             continue
 
         try:
-            response = requests.post(
+            data = post_json(
                 f"{ESI_URL}/universe/names/",
-                json=chunk,
-                headers={"User-Agent": USER_AGENT},
+                chunk,
+                user_agent=USER_AGENT,
                 timeout=TIMEOUT,
+                retries=1,
             )
-            response.raise_for_status()
-            for item in response.json() or []:
+            for item in data or []:
                 if not isinstance(item, dict):
                     continue
                 eve_id = _safe_int(item.get("id"))
@@ -586,7 +606,7 @@ def parse_summary_row(
                 opponent = name_map.get(attacker_id) or f"#{attacker_id}"
                 opponent_id = attacker_id
             else:
-                opponent = "Unknown attacker"
+                opponent = "NPC"
                 opponent_id = 0
         else:
             opponent_id = victim_character_id or victim_corp_id

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import os
 import py_compile
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -34,8 +31,6 @@ def check_required_files():
         "local_intel_updater.py",
         "EVE Local Intel Scanner.spec",
         "installer.iss",
-        "zkillCharLoad.py",
-        "zkillKillLoad.py",
     ]
 
     for name in required:

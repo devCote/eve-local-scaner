@@ -1,0 +1,33 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bear" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#E6BA62"></stop>
+      <stop offset="100%" stop-color="#B8792D"></stop>
+    </linearGradient>
+
+    <linearGradient id="muzzle" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F6E6C8"></stop>
+      <stop offset="100%" stop-color="#E6CEA5"></stop>
+    </linearGradient>
+  </defs>
+
+  <!-- ears -->
+  <circle cx="82" cy="78" r="24" fill="url(#bear)"></circle>
+  <circle cx="174" cy="78" r="24" fill="url(#bear)"></circle>
+
+  <!-- head -->
+  <circle cx="128" cy="128" r="78" fill="url(#bear)"></circle>
+
+  <!-- muzzle -->
+  <ellipse cx="128" cy="154" rx="34" ry="28" fill="url(#muzzle)"></ellipse>
+
+  <!-- eyes -->
+  <circle cx="101" cy="122" r="7" fill="#2C1808"></circle>
+  <circle cx="155" cy="122" r="7" fill="#2C1808"></circle>
+
+  <!-- nose -->
+  <ellipse cx="128" cy="144" rx="12" ry="9" fill="#4A2A0D"></ellipse>
+
+  <!-- mouth lower -->
+  <path d="M120 164 Q128 171 136 164" fill="none" stroke="#4A2A0D" stroke-width="5" stroke-linecap="round"></path>
+</svg>

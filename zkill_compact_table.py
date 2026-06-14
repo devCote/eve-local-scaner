@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app_fonts import APP_FONT_FAMILY
+
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QPalette, QPen
 from PySide6.QtWidgets import (
@@ -96,9 +98,8 @@ class _ResultRowDelegate(QStyledItemDelegate):
             painter.fillRect(option.rect, bg)
             painter.restore()
 
-        # Only the exact cell under the cursor becomes bold, except Date.
-        if cell_hovered and index.column() != 0:
-            opt.font.setBold(True)
+        # Hover changes only the row background / text color. No bold font.
+        if cell_hovered:
             opt.palette.setColor(QPalette.ColorRole.Text, QColor("#FFFFFF"))
 
         super().paint(painter, opt, index)
@@ -110,6 +111,7 @@ class KillsLossesTable(QTableWidget):
     shipHovered = Signal(dict)
     shipHoverLeft = Signal()
     shipClicked = Signal(dict)
+    popupCloseRequested = Signal()
 
     def __init__(self, parent=None, show_kind: bool = False, default_kind: str | None = None):
         super().__init__(parent)
@@ -189,7 +191,7 @@ class KillsLossesTable(QTableWidget):
         """Apply global UI font/color/frame color to the zKill compact table."""
         if font_size is not None:
             try:
-                self._font_size = max(7, min(18, int(font_size)))
+                self._font_size = max(7, min(11, int(font_size)))
             except Exception:
                 self._font_size = max(7, self._font_size)
 
@@ -198,11 +200,24 @@ class KillsLossesTable(QTableWidget):
         if frame_color:
             self._frame_color = str(frame_color)
 
+        # Normal zKill text must follow Options -> Text color.
+        # Kill/loss state is shown by row background, not by hardcoded text color.
+        text_qcolor = QColor(self._text_color)
+        if text_qcolor.isValid():
+            self._kill_text = QColor(text_qcolor)
+            self._loss_text = QColor(text_qcolor)
+            for row in range(self.rowCount()):
+                for col in range(self.columnCount()):
+                    item = self.item(row, col)
+                    if item:
+                        item.setForeground(text_qcolor)
+
         header_obj = self.horizontalHeader()
         if hasattr(header_obj, "set_separator_color"):
             header_obj.set_separator_color(self._frame_color)
 
         font = self.font()
+        font.setFamily(APP_FONT_FAMILY)
         font.setPointSize(int(self._font_size))
         self.setFont(font)
         self.viewport().setFont(font)
@@ -222,7 +237,7 @@ class KillsLossesTable(QTableWidget):
                 alternate-background-color: transparent;
                 color: {self._text_color};
                 border: 0px;
-                font-size: {self._font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self._font_size}pt;
                 selection-background-color: transparent;
                 selection-color: #FFFFFF;
             }}
@@ -233,7 +248,7 @@ class KillsLossesTable(QTableWidget):
                 padding-bottom: 0px;
                 border: 0px;
                 background-color: transparent;
-                font-size: {self._font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self._font_size}pt;
             }}
             QTableWidget::item:hover {{
                 background-color: transparent;
@@ -249,13 +264,13 @@ class KillsLossesTable(QTableWidget):
             }}
             QHeaderView::section {{
                 background-color: transparent;
-                color: #AEB6C0;
+                color: {self._text_color};
                 padding-left: 4px;
                 padding-right: 6px;
                 padding-top: 0px;
                 padding-bottom: 1px;
                 border: 0px;
-                font-size: {self._font_size}pt;
+                font-family: '{APP_FONT_FAMILY}'; font-size: {self._font_size}pt;
                 font-weight: normal;
                 text-align: left;
             }}
@@ -369,9 +384,22 @@ class KillsLossesTable(QTableWidget):
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
-        index = self.indexAt(event.position().toPoint())
-        if index.isValid() and index.column() == 1 and index.row() < len(self.rows_data):
-            self.shipClicked.emit(dict(self.rows_data[index.row()] or {}))
+        button = event.button()
+
+        if button in (Qt.RightButton, Qt.MiddleButton):
+            # Right click / wheel click must never open the fit popup.
+            # They close the current popup instead.
+            self.popupCloseRequested.emit()
+            self.clearSelection()
+            self.setCurrentItem(None)
+            event.accept()
+            return
+
+        if button == Qt.LeftButton:
+            index = self.indexAt(event.position().toPoint())
+            if index.isValid() and index.row() < len(self.rows_data):
+                # Open fitting popup from ANY cell in the row, not only Ship.
+                self.shipClicked.emit(dict(self.rows_data[index.row()] or {}))
 
         # Keep double-click activation, but do not leave a selected row behind.
         super().mousePressEvent(event)
@@ -488,10 +516,9 @@ class KillsLossesTable(QTableWidget):
         item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         item.setFont(self.font())
         item.setData(_KIND_ROLE, kind)
-        if kind == "kill":
-            item.setForeground(self._kill_text)
-        elif kind == "loss":
-            item.setForeground(self._loss_text)
+        text_qcolor = QColor(self._text_color)
+        if text_qcolor.isValid():
+            item.setForeground(text_qcolor)
         self.setItem(row, col, item)
 
     def _on_double_clicked(self, row: int, col: int):
