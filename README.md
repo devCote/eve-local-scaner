@@ -11,25 +11,23 @@ The app is designed for fast local intel checks while playing EVE Online: paste 
 
 ### General overview
 
-![General overview](docs/screenshots/general-overview.png)
+<img src="docs/screenshots/general-overview.png" alt="General overview" width="760">
 
 The General tab shows copied Local pilots with compact risk columns, corporation/alliance info and recent lost ships.  
 Rows are color-highlighted for related pilots and dangerous targets.
 
 ### zKill viewer and fit popup
 
-![zKill viewer and fit popup](docs/screenshots/zkill-fit-popup.png)
+<img src="docs/screenshots/zkill-fit-popup.png" alt="zKill viewer and fit popup" width="900">
 
 The built-in zKill viewer shows recent kills and losses without opening a browser.  
 Clicking a row opens a native fitting-style popup with ship/structure image, module layout, damage taken and estimated ISK values.
 
 ### Options panel
 
-![Options panel](docs/screenshots/options-panel.png)
+<img src="docs/screenshots/options-panel.png" alt="Options panel" width="520">
 
 The Options panel controls transparency, font size, blur, compact zKill mode, UI colors, General table columns and local cache cleanup.
-
-> Put your screenshot files into `docs/screenshots/` with the same names used above.
 
 ---
 
