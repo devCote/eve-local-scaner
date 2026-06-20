@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from parser import parse_pilots
-from worker import PilotWorker
+from worker import PilotWorker, PrefetchWorker
 from spinner import SpinnerManager
 from relations import RelationWorker
 from title_bar import TitleBar
@@ -96,6 +96,11 @@ class EveLocalScanner(QWidget):
 
         self.relations_pool = QThreadPool()
         self.relations_pool.setMaxThreadCount(1)
+
+        # Prefetch pool runs a single bulk ESI resolver (ids + tickers) before
+        # PilotWorker threads start, so per-pilot workers get cache hits.
+        self.prefetch_pool = QThreadPool()
+        self.prefetch_pool.setMaxThreadCount(1)
 
         self.spinner = SpinnerManager(self)
 
@@ -1095,6 +1100,13 @@ class EveLocalScanner(QWidget):
         for row, pilot in enumerate(pilots):
             self.set_loading_row(row, pilot)
 
+        # Bulk-resolve all pilot IDs + corp/alliance tickers in 1-2 ESI
+        # requests before the 12 per-pilot workers start. Workers then read
+        # from cache instead of each making their own ESI calls.
+        prefetch_worker = PrefetchWorker(pilots)
+        self.prefetch_pool.start(prefetch_worker)
+
+        for row, pilot in enumerate(pilots):
             worker = PilotWorker(row, pilot)
             worker.signals.finished.connect(self.update_pilot_row)
             self.thread_pool.start(worker)

@@ -7,6 +7,7 @@ from local_intel_db import get_last_lost_ships
 from esi_client import (
     get_character_id,
     get_ally_or_corp,
+    prefetch_local_pilots,
 )
 
 from zkill_client import (
@@ -21,6 +22,38 @@ class PilotWorkerSignals(QObject):
 
 class CynoWorkerSignals(QObject):
     finished = Signal(int, bool)
+
+
+class PrefetchWorkerSignals(QObject):
+    """Emitted when bulk ESI prefetch finishes.
+
+    The resolved name->id map is written into the shared cache by
+    prefetch_local_pilots(), so workers don't need the payload directly;
+    the signal just lets the UI proceed/start workers once warm.
+    """
+    finished = Signal()
+
+
+class PrefetchWorker(QRunnable):
+    """Bulk-resolve character IDs and corp/alliance tickers for a local list.
+
+    Runs once before PilotWorker threads start. One POST /universe/ids/ and one
+    POST /universe/names/ replace dozens of per-pilot ESI requests.
+    """
+
+    def __init__(self, pilot_names: list[str]):
+        super().__init__()
+        self.pilot_names = list(pilot_names or [])
+        self.signals = PrefetchWorkerSignals()
+        self.setAutoDelete(True)
+
+    def run(self):
+        try:
+            prefetch_local_pilots(self.pilot_names)
+        except Exception as e:
+            print(f"Prefetch error: {e}")
+        finally:
+            self.signals.finished.emit()
 
 
 def get_top_ship_ids_from_stats(stats: dict, limit: int = 3) -> list[int]:

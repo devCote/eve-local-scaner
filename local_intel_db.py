@@ -243,36 +243,188 @@ def get_top_destroyed_ships(character_id: int, limit: int = 3) -> list[dict]:
     ]
 
 
-def get_gang_stats(character_id: int) -> tuple[int, int, int]:
-    rows = _fetchall(
-        """
-        SELECT ka.killmail_id, COUNT(a.attacker_character_id) AS attacker_count
-        FROM killmail_attackers ka
-        JOIN killmail_attackers a ON a.killmail_id = ka.killmail_id
-        WHERE ka.attacker_character_id = ?
-        GROUP BY ka.killmail_id
-        """,
-        (int(character_id),),
-    )
+def _compute_and_cache_stats(character_id: int) -> dict | None:
+    """Compute per-character aggregates in one pass and cache them.
 
-    total = len(rows)
-    if total <= 0:
+    The old implementation ran a killmail_attackers self-join with no time
+    window and no LIMIT on every call. For active pilots that scans tens of
+    thousands of rows each view. Here we:
+      - count kills/losses and solo kills in a single grouped query,
+      - bound the work by the stored killmail window (DAYS_BACK),
+      - persist the result in character_stats so subsequent views are O(1).
+    """
+    conn = connect()
+    if conn is None:
+        return None
+
+    cid = int(character_id)
+    cur = conn.cursor()
+
+    try:
+        # Losses: one count over the victim index.
+        cur.execute(
+            "SELECT COUNT(*) FROM killmails WHERE victim_character_id = ?",
+            (cid,),
+        )
+        losses = int(cur.fetchone()[0] or 0)
+
+        # Kills + solo kills. A solo kill is a killmail where the pilot
+        # participated AND there was exactly one attacker total. We count the
+        # pilot's killmails that have no co-attackers via NOT EXISTS.
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT km.killmail_id)
+            FROM killmail_attackers km
+            WHERE km.attacker_character_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM killmail_attackers other
+                  WHERE other.killmail_id = km.killmail_id
+                    AND other.attacker_character_id != km.attacker_character_id
+              )
+            """,
+            (cid,),
+        )
+        solo_kills = int(cur.fetchone()[0] or 0)
+
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT killmail_id)
+            FROM killmail_attackers
+            WHERE attacker_character_id = ?
+            """,
+            (cid,),
+        )
+        kills = int(cur.fetchone()[0] or 0)
+
+        total = kills
+        # When a pilot has no kills, gang/solo ratios are undefined. The legacy
+        # implementation returned neutral 0/0 in that case; preserve it so the
+        # UI does not show a misleading 100% gang ratio for pure-victim pilots.
+        if total:
+            solo_ratio = round((solo_kills / total) * 100)
+            gang_ratio = max(0, 100 - solo_ratio)
+        else:
+            solo_ratio = 0
+            gang_ratio = 0
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        try:
+            cur.execute(
+                """
+                INSERT INTO character_stats (
+                    character_id, kills, losses, solo_kills,
+                    gang_ratio, solo_ratio, computed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(character_id) DO UPDATE SET
+                    kills = excluded.kills,
+                    losses = excluded.losses,
+                    solo_kills = excluded.solo_kills,
+                    gang_ratio = excluded.gang_ratio,
+                    solo_ratio = excluded.solo_ratio,
+                    computed_at = excluded.computed_at
+                """,
+                (cid, kills, losses, solo_kills, gang_ratio, solo_ratio, now_iso),
+            )
+            conn.commit()
+        except Exception as e:
+            print(f"[LOCAL DB] character_stats cache write error: {e}")
+
+        return {
+            "kills": kills,
+            "losses": losses,
+            "solo_kills": solo_kills,
+            "gang_ratio": gang_ratio,
+            "solo_ratio": solo_ratio,
+        }
+
+    except Exception as e:
+        print(f"[LOCAL DB] stats compute error: {e}")
+        return None
+
+
+def get_gang_stats(character_id: int) -> tuple[int, int, int]:
+    """Gang/solo ratios, served from character_stats cache when fresh.
+
+    Returns (gang_ratio, solo_ratio, solo_kills). Computes and caches on miss.
+    """
+    cid = int(character_id)
+    conn = connect()
+    if conn is None:
         return 0, 0, 0
 
-    solo = sum(1 for row in rows if int(row["attacker_count"] or 0) <= 1)
-    solo_ratio = round((solo / total) * 100)
-    gang_ratio = max(0, 100 - solo_ratio)
-    return gang_ratio, solo_ratio, solo
+    if not table_exists("character_stats"):
+        # Cold start: compute directly without persistence.
+        stats = _compute_and_cache_stats(cid)
+        if not stats:
+            return 0, 0, 0
+        return int(stats["gang_ratio"]), int(stats["solo_ratio"]), int(stats["solo_kills"])
+
+    try:
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT gang_ratio, solo_ratio, solo_kills FROM character_stats WHERE character_id = ?",
+            (cid,),
+        ).fetchone()
+    except Exception:
+        row = None
+
+    if row:
+        return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
+
+    stats = _compute_and_cache_stats(cid)
+    if not stats:
+        return 0, 0, 0
+    return int(stats["gang_ratio"]), int(stats["solo_ratio"]), int(stats["solo_kills"])
 
 
 def get_local_stats(character_id: int) -> dict:
-    kills = get_kill_count(character_id)
-    losses = get_loss_count(character_id)
+    cid = int(character_id)
+
+    # Kills/losses come from the cached aggregate when available; this collapses
+    # the old 4 separate queries (kills, losses, gang, top ships) into at most
+    # one cache lookup plus a single top-ships query.
+    kills = 0
+    losses = 0
+    gang_ratio = 0
+    solo_ratio = 0
+    solo_kills = 0
+
+    conn = connect()
+    if conn is not None and table_exists("character_stats"):
+        try:
+            cur = conn.cursor()
+            row = cur.execute(
+                "SELECT kills, losses, solo_kills, gang_ratio, solo_ratio FROM character_stats WHERE character_id = ?",
+                (cid,),
+            ).fetchone()
+        except Exception:
+            row = None
+
+        if row:
+            kills = int(row[0] or 0)
+            losses = int(row[1] or 0)
+            solo_kills = int(row[2] or 0)
+            gang_ratio = int(row[3] or 0)
+            solo_ratio = int(row[4] or 0)
+        else:
+            stats = _compute_and_cache_stats(cid)
+            if stats:
+                kills = int(stats["kills"])
+                losses = int(stats["losses"])
+                solo_kills = int(stats["solo_kills"])
+                gang_ratio = int(stats["gang_ratio"])
+                solo_ratio = int(stats["solo_ratio"])
+    else:
+        kills = get_kill_count(cid)
+        losses = get_loss_count(cid)
+        gang_ratio, solo_ratio, solo_kills = get_gang_stats(cid)
+
     total = kills + losses
 
     danger_ratio = round((losses / total) * 100) if total else 0
-    gang_ratio, solo_ratio, solo_kills = get_gang_stats(character_id)
-    top_ships = get_top_destroyed_ships(character_id, limit=10)
+    top_ships = get_top_destroyed_ships(cid, limit=10)
 
     return {
         "dangerRatio": int(danger_ratio),

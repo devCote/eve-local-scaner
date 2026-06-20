@@ -4,6 +4,7 @@ import json
 import time
 import sqlite3
 import tarfile
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,17 @@ DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "local_intel.sqlite"
 UNAVAILABLE_ARCHIVES_PATH = ROOT_DIR / "unavailable_archives.json"
 UNAVAILABLE_TTL_SECONDS = 4 * 60 * 60  # 4 hours
+
+# Debounce window for persisting unavailable_archives.json. A burst of cache
+# checks during startup collapses into at most one disk write.
+_UNAVAILABLE_SAVE_DEBOUNCE_SECONDS = 2.0
+
+# In-memory mirror of unavailable_archives.json. Loaded once on first access,
+# mutated in place, and persisted with a debounce so a burst of cache checks
+# during startup produces at most one disk write instead of one per call.
+_unavailable_cache: dict | None = None
+_unavailable_save_timer: threading.Timer | None = None
+_unavailable_save_lock = threading.Lock()
 
 CYNO_MODULES = {
     21096: "Cynosural Field Generator I",
@@ -84,34 +96,76 @@ def ensure_folders():
 
 
 def load_unavailable_archive_cache() -> dict:
+    """Return the in-memory mirror, loading from disk once on first use."""
+    global _unavailable_cache
+
+    if _unavailable_cache is not None:
+        return _unavailable_cache
+
     try:
         if not UNAVAILABLE_ARCHIVES_PATH.exists():
-            return {}
+            _unavailable_cache = {}
+            return _unavailable_cache
 
         with UNAVAILABLE_ARCHIVES_PATH.open("r", encoding="utf-8") as f:
             data = json.load(f)
 
-        if not isinstance(data, dict):
-            return {}
-
-        return data
+        _unavailable_cache = data if isinstance(data, dict) else {}
+        return _unavailable_cache
 
     except Exception:
-        return {}
+        _unavailable_cache = {}
+        return _unavailable_cache
 
 
-def save_unavailable_archive_cache(data: dict) -> None:
+def _write_unavailable_archive_cache() -> None:
+    """Persist the in-memory mirror to disk. Called by the debounce timer."""
+    global _unavailable_cache
+
+    if _unavailable_cache is None:
+        return
+
     try:
         UNAVAILABLE_ARCHIVES_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = UNAVAILABLE_ARCHIVES_PATH.with_suffix(UNAVAILABLE_ARCHIVES_PATH.suffix + ".tmp")
 
         with tmp.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            json.dump(_unavailable_cache, f, indent=2, ensure_ascii=False)
 
         tmp.replace(UNAVAILABLE_ARCHIVES_PATH)
 
     except Exception as e:
         print(f"[KILLMAILS] unavailable cache save error: {e}")
+
+
+def _schedule_unavailable_save() -> None:
+    """Debounce disk writes: collapse many mutations into one flush."""
+    global _unavailable_save_timer
+
+    with _unavailable_save_lock:
+        if _unavailable_save_timer is not None:
+            _unavailable_save_timer.cancel()
+
+        _unavailable_save_timer = threading.Timer(
+            _UNAVAILABLE_SAVE_DEBOUNCE_SECONDS, _write_unavailable_archive_cache
+        )
+        _unavailable_save_timer.daemon = True
+        _unavailable_save_timer.start()
+
+
+def save_unavailable_archive_cache(data: dict | None = None) -> None:
+    """Force an immediate flush of the unavailable cache to disk."""
+    global _unavailable_cache, _unavailable_save_timer
+
+    if data is not None:
+        _unavailable_cache = data
+
+    with _unavailable_save_lock:
+        if _unavailable_save_timer is not None:
+            _unavailable_save_timer.cancel()
+            _unavailable_save_timer = None
+
+    _write_unavailable_archive_cache()
 
 
 def unavailable_cache_get(archive_name: str) -> dict | None:
@@ -125,7 +179,7 @@ def unavailable_cache_get(archive_name: str) -> dict | None:
 
     if time.time() - checked_at > UNAVAILABLE_TTL_SECONDS:
         data.pop(archive_name, None)
-        save_unavailable_archive_cache(data)
+        _schedule_unavailable_save()
         return None
 
     return item
@@ -137,7 +191,7 @@ def unavailable_cache_set(archive_name: str, reason: str = "404") -> None:
         "checked_at": time.time(),
         "reason": str(reason),
     }
-    save_unavailable_archive_cache(data)
+    _schedule_unavailable_save()
 
 
 def unavailable_cache_clear(archive_name: str) -> None:
@@ -145,7 +199,7 @@ def unavailable_cache_clear(archive_name: str) -> None:
 
     if archive_name in data:
         data.pop(archive_name, None)
-        save_unavailable_archive_cache(data)
+        _schedule_unavailable_save()
 
 
 def unavailable_cache_prune(required_names: set[str]) -> None:
@@ -168,7 +222,7 @@ def unavailable_cache_prune(required_names: set[str]) -> None:
             changed = True
 
     if changed:
-        save_unavailable_archive_cache(data)
+        _schedule_unavailable_save()
 
 
 def download_archive(day, progress_callback: ProgressCallback | None = None, current=None, total=None) -> bool:
@@ -273,6 +327,7 @@ def rebuild_schema(conn: sqlite3.Connection, progress_callback: ProgressCallback
     cur.execute("DROP TABLE IF EXISTS killmails")
     cur.execute("DROP TABLE IF EXISTS cyno_losses")
     cur.execute("DROP TABLE IF EXISTS archive_status")
+    cur.execute("DROP TABLE IF EXISTS character_stats")
     cur.execute("PRAGMA user_version = 0")
     conn.commit()
 
@@ -359,6 +414,25 @@ def create_schema(conn: sqlite3.Connection, create_indexes_now: bool = True):
             cyno_count INTEGER NOT NULL
         )
     """)
+
+    # Cached per-character aggregate stats. Recomputed on demand and after
+    # imports; avoids the expensive killmail_attackers self-join on every view.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS character_stats (
+            character_id INTEGER PRIMARY KEY,
+            kills INTEGER NOT NULL DEFAULT 0,
+            losses INTEGER NOT NULL DEFAULT 0,
+            solo_kills INTEGER NOT NULL DEFAULT 0,
+            gang_ratio INTEGER NOT NULL DEFAULT 0,
+            solo_ratio INTEGER NOT NULL DEFAULT 0,
+            computed_at TEXT NOT NULL
+        )
+    """)
+
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_character_stats_id "
+        "ON character_stats(character_id)"
+    )
 
     if create_indexes_now:
         create_indexes(conn)
@@ -874,6 +948,11 @@ def cleanup_old_db_rows(conn: sqlite3.Connection, required_names: set[str], days
     cur.execute("DELETE FROM cyno_losses WHERE last_cyno_time < ?", (cutoff,))
     removed_cynos = cur.rowcount if cur.rowcount is not None else 0
 
+    # Old killmail removal changes per-character aggregates; drop the cached
+    # stats so they get recomputed on next access instead of going stale.
+    if removed_killmails or removed_attackers:
+        cur.execute("DELETE FROM character_stats")
+
     if required_names:
         placeholders = ",".join("?" for _ in required_names)
         cur.execute(
@@ -1097,6 +1176,15 @@ def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: Prog
             apply_sqlite_pragmas(conn, fast_import=False)
             cur = conn.cursor()
             cur.execute("PRAGMA optimize")
+            # New killmails change per-character aggregates; invalidate the
+            # cached stats so the UI shows fresh numbers on next access.
+            cur.execute("DELETE FROM character_stats")
+            # ANALYZE refreshes planner statistics after a bulk insert so SQLite
+            # picks good indexes for the new data distribution.
+            try:
+                cur.execute("ANALYZE")
+            except Exception as e:
+                print(f"[LOCAL DB] ANALYZE skipped: {e}")
             conn.commit()
 
         report(

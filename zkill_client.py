@@ -26,8 +26,6 @@ ESI_URL = "https://esi.evetech.net/latest"
 TIMEOUT = 8
 
 TTL_STATS = 1800      # 30 minutes: zKill stats cache
-TTL_RECENT = 900      # 15 minutes: local recent rows cache
-TTL_CYNO = 1800       # 30 minutes: local cyno cache
 CYNO_LOOKBACK_DAYS = 40
 
 CYNO_MODULE_IDS = {
@@ -57,27 +55,18 @@ def get_zkill_url(character_id: int) -> str:
 
 
 def get_recent_kills(character_id: int, limit: int = 10):
-    """Recent kills from local SQLite, not zKill API."""
-    cache_key = f"local:kills:{character_id}:{limit}"
-    cached = cache.get(cache_key, ttl_seconds=TTL_RECENT)
-    if cached is not None:
-        return cached
+    """Recent kills from local SQLite, not zKill API.
 
-    data = get_local_recent_kills(character_id, limit=limit)
-    cache.set(cache_key, data)
-    return data
+    Reads directly from SQLite. The DB is indexed (idx_attackers_character_killmail
+    + idx_killmails_time) so a repeated query is faster than parsing it back out
+    of a JSON cache blob.
+    """
+    return get_local_recent_kills(character_id, limit=limit)
 
 
 def get_recent_losses(character_id: int, limit: int = 50):
     """Recent losses from local SQLite, not zKill API."""
-    cache_key = f"local:losses:{character_id}:{limit}"
-    cached = cache.get(cache_key, ttl_seconds=TTL_RECENT)
-    if cached is not None:
-        return cached
-
-    data = get_local_recent_losses(character_id, limit=limit)
-    cache.set(cache_key, data)
-    return data
+    return get_local_recent_losses(character_id, limit=limit)
 
 
 def get_full_killmail(killmail_id: int, killmail_hash: str | None = None):
@@ -174,15 +163,12 @@ def has_cyno_history(
     days: int = CYNO_LOOKBACK_DAYS,
     max_killmails: int = 5,
 ) -> bool:
-    """Cyno history from local SQLite cyno_losses table."""
-    cache_key = f"local:cyno:v4:{character_id}:{days}"
-    cached = cache.get(cache_key, ttl_seconds=TTL_CYNO)
-    if cached is not None:
-        return bool(cached)
+    """Cyno history from local SQLite cyno_losses table.
 
-    result = local_has_cyno_history(character_id, days=days)
-    cache.set(cache_key, bool(result))
-    return bool(result)
+    cyno_losses.character_id is the PRIMARY KEY, so this is an O(log n) lookup.
+    No need to mirror it in the JSON cache.
+    """
+    return bool(local_has_cyno_history(character_id, days=days))
 
 
 def get_local_cyno_info(character_id: int, days: int = CYNO_LOOKBACK_DAYS):

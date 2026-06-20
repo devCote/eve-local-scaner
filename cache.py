@@ -1,3 +1,4 @@
+import atexit
 import json
 import time
 import threading
@@ -7,6 +8,11 @@ from paths import user_data_path
 
 
 CACHE_FILE = user_data_path("cache.json")
+
+# Debounce window: collect writes and flush to disk at most once per this interval.
+# This avoids rewriting the whole cache.json on every single set() call (which
+# happens a lot when scanning 50+ pilots in parallel from 12 worker threads).
+SAVE_DEBOUNCE_SECONDS = 3.0
 
 
 def _json_safe(value):
@@ -45,6 +51,13 @@ class FileCache:
         self.lock = threading.RLock()
         self.data = self.load()
 
+        # Debounced saving: instead of rewriting cache.json on every set(),
+        # schedule a single background flush after SAVE_DEBOUNCE_SECONDS of
+        # inactivity. Many set() calls within the window collapse into one write.
+        self._save_thread: threading.Timer | None = None
+        self._dirty = False
+        atexit.register(self.flush)
+
     def load(self):
         if not self.filename.exists():
             return {}
@@ -58,20 +71,56 @@ class FileCache:
         except Exception:
             return {}
 
-    def save(self):
+    def _write_to_disk(self):
+        """Write the current cache data to disk atomically.
+
+        Called by the debounce timer. Must not hold the data lock while doing
+        disk I/O, so it snapshots under the lock first.
+        """
         try:
             with self.lock:
-                self.filename.parent.mkdir(parents=True, exist_ok=True)
                 data_copy = dict(self.data)
-                tmp_path = self.filename.with_suffix(self.filename.suffix + ".tmp")
+                self._dirty = False
 
-                with tmp_path.open("w", encoding="utf-8") as file:
-                    json.dump(data_copy, file, ensure_ascii=False, indent=2)
+            self.filename.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.filename.with_suffix(self.filename.suffix + ".tmp")
 
-                tmp_path.replace(self.filename)
+            with tmp_path.open("w", encoding="utf-8") as file:
+                json.dump(data_copy, file, ensure_ascii=False, indent=2)
+
+            tmp_path.replace(self.filename)
 
         except Exception as e:
             print("Cache save error:", e)
+
+    def _schedule_save(self):
+        """Schedule a debounced flush. Collapses many set() calls into one write.
+
+        The Timer lives until it fires or is cancelled by the next set(). Each
+        new set() resets the inactivity window, so a burst of 50 parallel
+        writes produces a single disk write once they settle.
+        """
+        with self.lock:
+            self._dirty = True
+            if self._save_thread is not None:
+                self._save_thread.cancel()
+
+            self._save_thread = threading.Timer(SAVE_DEBOUNCE_SECONDS, self._write_to_disk)
+            self._save_thread.daemon = True
+            self._save_thread.start()
+
+    def save(self):
+        """Force an immediate flush. Kept for explicit callers and atexit."""
+        with self.lock:
+            if self._save_thread is not None:
+                self._save_thread.cancel()
+                self._save_thread = None
+
+        self._write_to_disk()
+
+    def flush(self):
+        """Alias for save(); used by atexit to persist pending writes."""
+        self.save()
 
     def get(self, key: str, ttl_seconds: int):
         with self.lock:
@@ -102,7 +151,7 @@ class FileCache:
         with self.lock:
             self.data[key] = {"created_at": time.time(), "value": safe_value}
 
-        self.save()
+        self._schedule_save()
 
     def clear_expired(self, ttl_seconds: int = 7 * 24 * 3600):
         now = time.time()
@@ -118,7 +167,7 @@ class FileCache:
                 self.data.pop(key, None)
 
         if keys_to_delete:
-            self.save()
+            self._schedule_save()
 
 
 cache = FileCache()
