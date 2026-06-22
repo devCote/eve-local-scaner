@@ -12,12 +12,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from paths import USER_DATA_DIR, ensure_user_data_dirs
+from app_http_client import request as http_request
 
 
 DAYS_BACK = 40
+# Daily EVE Ref archive for today is normally missing/incomplete while the day
+# is still running. Yesterday is checked because it may already be available.
+# Fresh today killmails are handled by R2Z2.
+ARCHIVE_STABLE_DELAY_DAYS = 1
 SCHEMA_VERSION = 2
 
-USER_AGENT = "EVE-Local-Intel-Scanner"
+USER_AGENT = "EVE-Local-Intel-Scanner/2.0.0 (+https://github.com/devCote/eve-local-scaner)"
 BASE_URL = "https://data.everef.net/killmails/{year}/killmails-{date}.tar.bz2"
 
 ROOT_DIR = USER_DATA_DIR
@@ -25,7 +30,13 @@ KILLMAILS_DIR = ROOT_DIR / "killmails"
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "local_intel.sqlite"
 UNAVAILABLE_ARCHIVES_PATH = ROOT_DIR / "unavailable_archives.json"
+R2Z2_STATE_PATH = ROOT_DIR / "r2z2_state.json"
 UNAVAILABLE_TTL_SECONDS = 4 * 60 * 60  # 4 hours
+
+R2Z2_SEQUENCE_URL = "https://r2z2.zkillboard.com/ephemeral/sequence.json"
+R2Z2_FILE_URL = "https://r2z2.zkillboard.com/ephemeral/{sequence}.json"
+R2Z2_STARTUP_MAX_FILES = 75
+R2Z2_STARTUP_MAX_SECONDS = 3.0
 
 # Debounce window for persisting unavailable_archives.json. A burst of cache
 # checks during startup collapses into at most one disk write.
@@ -50,11 +61,13 @@ IMPORT_INDEXES = {
     "idx_attackers_character_killmail": "CREATE INDEX IF NOT EXISTS idx_attackers_character_killmail ON killmail_attackers(attacker_character_id, killmail_id)",
     "idx_attackers_killmail": "CREATE INDEX IF NOT EXISTS idx_attackers_killmail ON killmail_attackers(killmail_id)",
     "idx_cyno_losses_time": "CREATE INDEX IF NOT EXISTS idx_cyno_losses_time ON cyno_losses(last_cyno_time)",
+    "idx_killmail_details_hash": "CREATE INDEX IF NOT EXISTS idx_killmail_details_hash ON killmail_details(killmail_hash)",
 }
 
 BULK_KILLMAIL_CHUNK = 5000
 BULK_ATTACKER_CHUNK = 25000
 BULK_CYNO_CHUNK = 2500
+BULK_DETAIL_CHUNK = 2500
 
 ProgressCallback = Callable[[str, int | None, int | None], None]
 
@@ -73,9 +86,18 @@ def utc_today():
     return datetime.now(timezone.utc).date()
 
 
-def required_days(days_back: int = DAYS_BACK):
+def required_days(days_back: int = DAYS_BACK, stable_delay_days: int = ARCHIVE_STABLE_DELAY_DAYS):
+    """Archive days that should be checked.
+
+    Today is skipped because the daily archive is normally missing/incomplete
+    until the day is over. Yesterday is checked: if the archive already exists,
+    it is downloaded/imported; if it is still unavailable, it is cached as
+    temporary 404 and R2Z2 covers fresh data until the archive appears.
+    """
     today = utc_today()
-    return [today - timedelta(days=i) for i in range(days_back)]
+    start = max(0, int(stable_delay_days))
+    count = max(0, int(days_back))
+    return [today - timedelta(days=i) for i in range(start, start + count)]
 
 
 def archive_name_for_day(day) -> str:
@@ -328,6 +350,7 @@ def rebuild_schema(conn: sqlite3.Connection, progress_callback: ProgressCallback
     cur.execute("DROP TABLE IF EXISTS cyno_losses")
     cur.execute("DROP TABLE IF EXISTS archive_status")
     cur.execute("DROP TABLE IF EXISTS character_stats")
+    cur.execute("DROP TABLE IF EXISTS killmail_details")
     cur.execute("PRAGMA user_version = 0")
     conn.commit()
 
@@ -412,6 +435,27 @@ def create_schema(conn: sqlite3.Connection, create_indexes_now: bool = True):
             json_count INTEGER NOT NULL,
             attacker_rows INTEGER NOT NULL,
             cyno_count INTEGER NOT NULL
+        )
+    """)
+
+    # Full/minimal killmail payload used by native fitting popup and optional
+    # local zKill rendering. This avoids zKill /killID + ESI /killmails calls
+    # when the killmail was imported from EVE Ref or R2Z2.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS killmail_details (
+            killmail_id INTEGER PRIMARY KEY,
+            killmail_hash TEXT,
+            killmail_json TEXT NOT NULL,
+            zkb_json TEXT,
+            victim_items_json TEXT,
+            victim_damage_taken INTEGER DEFAULT 0,
+            victim_ship_type_id INTEGER,
+            destroyed_value REAL DEFAULT 0,
+            dropped_value REAL DEFAULT 0,
+            total_value REAL DEFAULT 0,
+            sequence_id INTEGER,
+            uploaded_at INTEGER,
+            updated_at TEXT NOT NULL
         )
     """)
 
@@ -654,6 +698,110 @@ def save_cyno_loss_rows(conn: sqlite3.Connection, rows: list[tuple]) -> int:
     return len(rows)
 
 
+
+def _json_dump_compact(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except Exception:
+        return "{}"
+
+
+def _extract_killmail_hash(killmail: dict[str, Any], zkb_override: dict[str, Any] | None = None) -> str:
+    if not isinstance(killmail, dict):
+        return ""
+
+    zkb = zkb_override if isinstance(zkb_override, dict) else killmail.get("zkb")
+    if not isinstance(zkb, dict):
+        zkb = {}
+
+    value = (
+        killmail.get("killmail_hash")
+        or killmail.get("hash")
+        or zkb.get("hash")
+    )
+    return str(value or "").strip()
+
+
+def killmail_detail_row_from_json(
+    killmail: dict[str, Any],
+    zkb_override: dict[str, Any] | None = None,
+    sequence_id: int | None = None,
+    uploaded_at: int | None = None,
+) -> tuple | None:
+    if not isinstance(killmail, dict):
+        return None
+
+    killmail_id = killmail.get("killmail_id")
+    if not killmail_id:
+        return None
+
+    victim = killmail.get("victim", {}) or {}
+    if not isinstance(victim, dict):
+        victim = {}
+
+    zkb = zkb_override if isinstance(zkb_override, dict) else killmail.get("zkb")
+    if not isinstance(zkb, dict):
+        zkb = {}
+
+    items = victim.get("items") if isinstance(victim.get("items"), list) else []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    return (
+        int(killmail_id),
+        _extract_killmail_hash(killmail, zkb),
+        _json_dump_compact(killmail),
+        _json_dump_compact(zkb),
+        _json_dump_compact(items),
+        int(victim.get("damage_taken") or 0),
+        victim.get("ship_type_id"),
+        float(zkb.get("destroyedValue") or 0),
+        float(zkb.get("droppedValue") or 0),
+        float(zkb.get("totalValue") or 0),
+        int(sequence_id) if sequence_id else None,
+        int(uploaded_at) if uploaded_at else None,
+        now_iso,
+    )
+
+
+def save_killmail_detail_rows(conn: sqlite3.Connection, rows: list[tuple]) -> int:
+    if not rows:
+        return 0
+
+    cur = conn.cursor()
+    _executemany_chunked(cur, """
+        INSERT INTO killmail_details (
+            killmail_id,
+            killmail_hash,
+            killmail_json,
+            zkb_json,
+            victim_items_json,
+            victim_damage_taken,
+            victim_ship_type_id,
+            destroyed_value,
+            dropped_value,
+            total_value,
+            sequence_id,
+            uploaded_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(killmail_id) DO UPDATE SET
+            killmail_hash = COALESCE(NULLIF(excluded.killmail_hash, ''), killmail_details.killmail_hash),
+            killmail_json = excluded.killmail_json,
+            zkb_json = excluded.zkb_json,
+            victim_items_json = excluded.victim_items_json,
+            victim_damage_taken = excluded.victim_damage_taken,
+            victim_ship_type_id = excluded.victim_ship_type_id,
+            destroyed_value = excluded.destroyed_value,
+            dropped_value = excluded.dropped_value,
+            total_value = excluded.total_value,
+            sequence_id = COALESCE(excluded.sequence_id, killmail_details.sequence_id),
+            uploaded_at = COALESCE(excluded.uploaded_at, killmail_details.uploaded_at),
+            updated_at = excluded.updated_at
+    """, rows, BULK_DETAIL_CHUNK)
+    return len(rows)
+
+
 def save_killmail(conn: sqlite3.Connection, killmail: dict[str, Any]) -> bool:
     killmail_id = killmail.get("killmail_id")
     killmail_time = killmail.get("killmail_time")
@@ -827,6 +975,7 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
     killmail_rows: list[tuple] = []
     attacker_rows: list[tuple] = []
     cyno_rows: list[tuple] = []
+    detail_rows: list[tuple] = []
 
     try:
         with tarfile.open(archive_path, "r:bz2") as tar:
@@ -852,6 +1001,9 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
                 json_count += 1
                 killmail_rows.append(row)
                 attacker_rows.extend(attacker_rows_from_json(killmail))
+                detail_row = killmail_detail_row_from_json(killmail)
+                if detail_row:
+                    detail_rows.append(detail_row)
 
                 module_id = find_victim_cyno_module(killmail)
                 if module_id:
@@ -873,6 +1025,7 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
         save_killmail_rows(conn, killmail_rows)
         attacker_count = save_attacker_rows_bulk(conn, attacker_rows)
         save_cyno_loss_rows(conn, cyno_rows)
+        detail_count = save_killmail_detail_rows(conn, detail_rows)
 
         mark_archive_processed(
             conn=conn,
@@ -898,7 +1051,7 @@ def process_archive(conn: sqlite3.Connection, archive_path: Path, progress_callb
 
         report(
             progress_callback,
-            f"[LOCAL DB] ok: {archive_path.name} json={json_count} attackers={attacker_count} cynos={cyno_count}",
+            f"[LOCAL DB] ok: {archive_path.name} json={json_count} attackers={attacker_count} cynos={cyno_count} details={detail_count}",
             current,
             total,
         )
@@ -942,8 +1095,20 @@ def cleanup_old_db_rows(conn: sqlite3.Connection, required_names: set[str], days
     """, (cutoff,))
     removed_attackers = cur.rowcount if cur.rowcount is not None else 0
 
+    cur.execute("""
+        DELETE FROM killmail_details
+        WHERE killmail_id NOT IN (SELECT killmail_id FROM killmails)
+    """)
+    removed_details = cur.rowcount if cur.rowcount is not None else 0
+
     cur.execute("DELETE FROM killmails WHERE killmail_time < ?", (cutoff,))
     removed_killmails = cur.rowcount if cur.rowcount is not None else 0
+
+    cur.execute("""
+        DELETE FROM killmail_details
+        WHERE killmail_id NOT IN (SELECT killmail_id FROM killmails)
+    """)
+    removed_details += cur.rowcount if cur.rowcount is not None else 0
 
     cur.execute("DELETE FROM cyno_losses WHERE last_cyno_time < ?", (cutoff,))
     removed_cynos = cur.rowcount if cur.rowcount is not None else 0
@@ -965,13 +1130,13 @@ def cleanup_old_db_rows(conn: sqlite3.Connection, required_names: set[str], days
 
     conn.commit()
 
-    total = int(removed_attackers) + int(removed_killmails) + int(removed_cynos) + int(removed_archives)
+    total = int(removed_attackers) + int(removed_killmails) + int(removed_details) + int(removed_cynos) + int(removed_archives)
 
     if total:
         report(
             progress_callback,
             "[LOCAL DB] cleanup: "
-            f"killmails={removed_killmails}, attackers={removed_attackers}, "
+            f"killmails={removed_killmails}, details={removed_details}, attackers={removed_attackers}, "
             f"cynos={removed_cynos}, archives={removed_archives}",
         )
 
@@ -1023,30 +1188,30 @@ def get_unprocessed_archives(conn: sqlite3.Connection, days) -> list[Path]:
 
 def get_missing_days(days) -> list:
     """Find days that need to be downloaded.
-    
-    A day is considered "missing" if:
-    - Archive file doesn't exist on disk AND
-    - Archive hasn't been processed (not in archive_status table)
-    
-    This way if archive was downloaded and processed, we don't re-download
-    even if the .tar.bz2 file was deleted to save disk space.
+
+    A day is considered missing if:
+    - archive file does not exist on disk;
+    - archive was not already processed;
+    - archive is not currently in the temporary unavailable/404 cache.
+
+    This means yesterday is checked when it may be available, but once EVE Ref
+    returns 404 the app will not re-request it until the retry TTL expires.
     """
     result = []
 
     for day in days:
-        archive_path = KILLMAILS_DIR / archive_name_for_day(day)
+        archive_name = archive_name_for_day(day)
+        archive_path = KILLMAILS_DIR / archive_name
 
-        # If file exists, no need to download
         if archive_path.exists() and archive_path.stat().st_size > 0:
             continue
-        
-        # If file doesn't exist but was already processed, skip download
-        # (it means we deleted it after processing - intentional)
-        archive_name = archive_name_for_day(day)
+
         if archive_was_processed(archive_name):
             continue
-        
-        # File missing AND not processed before = need to download
+
+        if unavailable_cache_get(archive_name):
+            continue
+
         result.append(day)
 
     return result
@@ -1075,13 +1240,227 @@ def archive_was_processed(archive_name: str) -> bool:
         return False
 
 
+def effective_required_archive_names(required_names: set[str]) -> set[str]:
+    """Required archives minus currently cached 404/unavailable archives.
+
+    If yesterday is not published yet, it should not make the DB look broken.
+    Once the 404 cache TTL expires, it becomes required again and the downloader
+    checks it again.
+    """
+    result: set[str] = set()
+    for name in required_names:
+        if unavailable_cache_get(name):
+            continue
+        result.add(name)
+    return result
+
+
 def database_has_recent_window(conn: sqlite3.Connection, required_names: set[str]) -> bool:
     processed = get_processed_archive_names(conn)
+    effective_names = effective_required_archive_names(required_names)
 
-    if not required_names:
-        return False
+    if not effective_names:
+        return bool(processed)
 
-    return required_names.issubset(processed)
+    return effective_names.issubset(processed)
+
+
+def _load_r2z2_state() -> dict[str, Any]:
+    try:
+        if R2Z2_STATE_PATH.exists():
+            data = json.loads(R2Z2_STATE_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print(f"[R2Z2] state load error: {exc}")
+    return {}
+
+
+def _save_r2z2_state(state: dict[str, Any]) -> None:
+    try:
+        R2Z2_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = R2Z2_STATE_PATH.with_suffix(R2Z2_STATE_PATH.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(R2Z2_STATE_PATH)
+    except Exception as exc:
+        print(f"[R2Z2] state save error: {exc}")
+
+
+def _r2z2_get_json(url: str, timeout: int | float = 4):
+    try:
+        response = http_request(
+            "GET",
+            url,
+            user_agent=USER_AGENT,
+            timeout=timeout,
+            retries=0,
+            accept_json=True,
+        )
+        if response.status_code == 200:
+            return response.json(), 200
+        return None, int(response.status_code)
+    except Exception as exc:
+        print(f"[R2Z2] request error: {url} -> {exc}")
+        return None, 0
+
+
+def _r2z2_latest_sequence() -> int:
+    data, status = _r2z2_get_json(R2Z2_SEQUENCE_URL, timeout=4)
+    if status != 200 or not isinstance(data, dict):
+        return 0
+    try:
+        return int(data.get("sequence") or 0)
+    except Exception:
+        return 0
+
+
+def _normalize_r2z2_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], int, int] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    # R2Z2 currently includes raw killmail data and zkb metadata. Keep this
+    # flexible so a harmless field-name addition does not break the importer.
+    killmail = (
+        payload.get("killmail")
+        or payload.get("esi")
+        or payload.get("raw")
+        or payload.get("data")
+    )
+    if not isinstance(killmail, dict) and payload.get("victim") and payload.get("killmail_id"):
+        killmail = payload
+
+    if not isinstance(killmail, dict):
+        return None
+
+    zkb = payload.get("zkb")
+    if not isinstance(zkb, dict):
+        zkb = killmail.get("zkb") if isinstance(killmail.get("zkb"), dict) else {}
+
+    sequence_id = 0
+    uploaded_at = 0
+    try:
+        sequence_id = int(payload.get("sequence_id") or killmail.get("sequence_id") or 0)
+    except Exception:
+        sequence_id = 0
+    try:
+        uploaded_at = int(payload.get("uploaded_at") or killmail.get("uploaded_at") or 0)
+    except Exception:
+        uploaded_at = 0
+
+    return killmail, zkb if isinstance(zkb, dict) else {}, sequence_id, uploaded_at
+
+
+def import_r2z2_incremental(
+    conn: sqlite3.Connection,
+    progress_callback: ProgressCallback | None = None,
+    max_files: int = R2Z2_STARTUP_MAX_FILES,
+    max_seconds: float = R2Z2_STARTUP_MAX_SECONDS,
+) -> int:
+    """Import a small R2Z2 catch-up window without slowing startup.
+
+    R2Z2 is ephemeral and intended for new killmails. On first run we only
+    initialize the cursor to the current sequence. On later runs we process a
+    bounded number of sequence files, then save next_sequence for next launch.
+    """
+    state = _load_r2z2_state()
+    latest = _r2z2_latest_sequence()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if latest <= 0:
+        return 0
+
+    next_sequence = int(state.get("next_sequence") or 0)
+    if next_sequence <= 0:
+        # sequence.json returns a valid starting sequence. Do not skip it.
+        # We only initialize the cursor during first startup to avoid delaying
+        # the initial app open; the next launch/update can fetch it if still
+        # available.
+        _save_r2z2_state({
+            "next_sequence": latest,
+            "latest_seen_sequence": max(0, latest - 1),
+            "last_checked": now_iso,
+        })
+        report(progress_callback, f"[R2Z2] initialized at sequence {latest}")
+        return 0
+
+    inserted = 0
+    processed = 0
+    start_time = time.monotonic()
+
+    while processed < int(max_files) and (time.monotonic() - start_time) < float(max_seconds):
+        data, status = _r2z2_get_json(R2Z2_FILE_URL.format(sequence=next_sequence), timeout=4)
+
+        if status == 404:
+            # No more killmails yet. Do not sleep during app startup; just stop.
+            break
+
+        if status == 403:
+            # User-Agent/rate block or temporary Cloudflare block. Stop quietly.
+            report(progress_callback, "[R2Z2] stopped: 403 from R2Z2")
+            break
+
+        if status != 200 or not isinstance(data, dict):
+            break
+
+        normalized = _normalize_r2z2_payload(data)
+        if not normalized:
+            next_sequence += 1
+            processed += 1
+            continue
+
+        killmail, zkb, sequence_id, uploaded_at = normalized
+
+        killmail_rows = []
+        row = killmail_row_from_json(killmail)
+        if row:
+            killmail_rows.append(row)
+
+        attacker_rows = attacker_rows_from_json(killmail)
+        detail_rows = []
+        detail_row = killmail_detail_row_from_json(
+            killmail,
+            zkb_override=zkb,
+            sequence_id=sequence_id or next_sequence,
+            uploaded_at=uploaded_at,
+        )
+        if detail_row:
+            detail_rows.append(detail_row)
+
+        cyno_rows = []
+        module_id = find_victim_cyno_module(killmail)
+        if module_id:
+            cyno_row = cyno_loss_row_from_json(killmail, int(module_id))
+            if cyno_row:
+                cyno_rows.append(cyno_row)
+
+        if killmail_rows:
+            save_killmail_rows(conn, killmail_rows)
+            save_attacker_rows_bulk(conn, attacker_rows)
+            save_killmail_detail_rows(conn, detail_rows)
+            save_cyno_loss_rows(conn, cyno_rows)
+            inserted += len(killmail_rows)
+
+        next_sequence += 1
+        processed += 1
+
+        # Keep under the documented 15 req/s R2 rate limit. 0.12s ~= 8.3 req/s.
+        time.sleep(0.12)
+
+    if inserted:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM character_stats")
+        conn.commit()
+
+    _save_r2z2_state({
+        "next_sequence": next_sequence,
+        "latest_seen_sequence": max(latest, next_sequence - 1),
+        "last_checked": now_iso,
+        "processed_last_run": processed,
+        "inserted_last_run": inserted,
+    })
+
+    if inserted:
+        report(progress_callback, f"[R2Z2] imported fresh killmails: {inserted}")
+    return inserted
 
 
 def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: ProgressCallback | None = None) -> dict[str, int]:
@@ -1090,6 +1469,17 @@ def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: Prog
     days = required_days(days_back)
     required_names = {archive_name_for_day(day) for day in days}
     unavailable_cache_prune(required_names)
+
+    if days:
+        newest_archive_day = max(days).strftime("%Y-%m-%d")
+        oldest_archive_day = min(days).strftime("%Y-%m-%d")
+        report(
+            progress_callback,
+            f"[1/4] Archive check window: {newest_archive_day} .. {oldest_archive_day} "
+            f"(today via R2Z2; yesterday checked if available)",
+            1,
+            100,
+        )
 
     report(progress_callback, "[1/4] Checking local SQLite database...", 2, 100)
     conn = init_db(progress_callback)
@@ -1101,26 +1491,33 @@ def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: Prog
         unprocessed_archives = get_unprocessed_archives(conn, days)
 
         if not missing_days and not unprocessed_archives and database_has_recent_window(conn, required_names):
+            report(progress_callback, "[4/4] Checking fresh zKill R2Z2 updates...", 96, 100)
+            r2z2_imported = import_r2z2_incremental(conn, progress_callback=None)
+            if r2z2_imported:
+                cur = conn.cursor()
+                cur.execute("PRAGMA optimize")
+                conn.commit()
             report(progress_callback, "[4/4] Local intel database is ready. Opening app...", 100, 100)
             return {
-                "processed": 0,
+                "processed": r2z2_imported,
                 "downloaded": 0,
                 "days": len(days),
                 "total_steps": 1,
             }
 
         downloaded = 0
+        skipped_unavailable = 0
 
         # Phase 2: downloads use 5-45%
         download_total = max(1, len(missing_days))
 
         if missing_days:
-            report(progress_callback, f"[2/4] Downloading missing archives: {len(missing_days)}", 5, 100)
+            report(progress_callback, f"[2/4] Checking/downloading missing archives: {len(missing_days)}", 5, 100)
 
         for index, day in enumerate(missing_days, start=1):
             archive_name = archive_name_for_day(day)
             percent = 5 + int((index - 1) / download_total * 40)
-            report(progress_callback, f"[2/4] Downloading {index}/{len(missing_days)}: {archive_name}", percent, 100)
+            report(progress_callback, f"[2/4] Checking {index}/{len(missing_days)}: {archive_name}", percent, 100)
 
             ok = download_archive(day, progress_callback=None)
 
@@ -1128,10 +1525,25 @@ def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: Prog
                 downloaded += 1
                 status = "Downloaded"
             else:
-                status = "Skipped / not available yet"
+                if unavailable_cache_get(archive_name):
+                    skipped_unavailable += 1
+                    status = "Not available yet"
+                else:
+                    status = "Skipped / download error"
 
             percent = 5 + int(index / download_total * 40)
             report(progress_callback, f"[2/4] {status} {index}/{len(missing_days)}", percent, 100)
+
+        cached_unavailable = sorted(name for name in required_names if unavailable_cache_get(name))
+        if cached_unavailable:
+            preview = ", ".join(cached_unavailable[:3])
+            extra = "" if len(cached_unavailable) <= 3 else f" +{len(cached_unavailable) - 3}"
+            report(
+                progress_callback,
+                f"[2/4] Recently unavailable archives ignored until retry TTL: {preview}{extra}",
+                46,
+                100,
+            )
 
         # Phase 3: cleanup
         report(progress_callback, "[3/4] Cleaning old local data...", 48, 100)
@@ -1167,8 +1579,11 @@ def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: Prog
             percent = 52 + int(index / process_total * 36)
             report(progress_callback, f"[3/4] Added to SQLite {index}/{len(unprocessed_archives)}", percent, 100)
 
+        report(progress_callback, "[4/4] Checking fresh zKill R2Z2 updates...", 90, 100)
+        r2z2_imported = import_r2z2_incremental(conn, progress_callback=None)
+
         # Phase 4: optimize only if changed. Keep under 100 until really finished.
-        if downloaded or processed_archives:
+        if downloaded or processed_archives or r2z2_imported:
             report(progress_callback, "[4/4] Optimizing SQLite database...", 92, 100)
             if defer_indexes:
                 create_indexes(conn)
@@ -1189,7 +1604,7 @@ def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: Prog
 
         report(
             progress_callback,
-            f"[4/4] Local intel database is ready. downloaded={downloaded}, processed={processed_archives}. Opening app...",
+            f"[4/4] Local intel database is ready. downloaded={downloaded}, unavailable={skipped_unavailable}, processed={processed_archives}, r2z2={r2z2_imported}. Opening app...",
             100,
             100,
         )
@@ -1197,6 +1612,7 @@ def ensure_local_intel_ready(days_back: int = DAYS_BACK, progress_callback: Prog
         return {
             "processed": processed_archives,
             "downloaded": downloaded,
+            "unavailable": skipped_unavailable,
             "days": len(days),
             "total_steps": 100,
         }

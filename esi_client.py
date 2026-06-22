@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from cache import cache
 from app_http_client import get_json, post_json
 
@@ -20,6 +22,20 @@ def _safe_int(value) -> int:
         return int(value)
     except Exception:
         return 0
+
+
+def _ticker_cache_key(eve_id: int) -> str:
+    # v2 ignores older cache entries accidentally filled with full names by
+    # /universe/names/. That endpoint returns entity names, not corp/alliance
+    # tickers.
+    return f"esi:ticker:v2:{int(eve_id)}"
+
+
+def _valid_ticker(value) -> str:
+    ticker = str(value or "").strip()
+    if not ticker or ticker == "?":
+        return ""
+    return ticker
 
 
 def get_character_id(character_name: str):
@@ -153,55 +169,76 @@ def resolve_character_ids(names: list[str]) -> dict[str, int]:
 
 
 def resolve_affiliation_tickers(corporation_ids: list[int], alliance_ids: list[int]) -> dict[int, str]:
-    """Resolve corp/alliance tickers via batch /universe/names/.
+    """Resolve real corp/alliance tickers.
 
-    Returns id -> ticker map covering both corporations and alliances.
-    Uses the cache first; only uncached ids hit ESI in chunks.
+    Important: POST /universe/names/ returns full entity names, not tickers.
+    Tickers are only available from:
+      GET /corporations/{corporation_id}/
+      GET /alliances/{alliance_id}/
+
+    This function keeps the old public signature, but internally fetches real
+    ticker fields and caches them under a v2 key so stale full-name cache entries
+    from older builds are ignored.
     """
     result: dict[int, str] = {}
 
-    unique_ids = sorted({
-        int(x) for x in (list(corporation_ids) + list(alliance_ids))
-        if _safe_int(x) > 0
-    })
+    corp_unique = sorted({_safe_int(x) for x in corporation_ids or [] if _safe_int(x) > 0})
+    alliance_unique = sorted({_safe_int(x) for x in alliance_ids or [] if _safe_int(x) > 0})
 
-    if not unique_ids:
+    tasks: list[tuple[str, int]] = []
+
+    for corp_id in corp_unique:
+        cached = cache.get(_ticker_cache_key(corp_id), ttl_seconds=TTL_CORP_ALLIANCE_INFO)
+        ticker = _valid_ticker(cached)
+        if ticker:
+            result[corp_id] = ticker
+        else:
+            tasks.append(("corp", corp_id))
+
+    for alliance_id in alliance_unique:
+        cached = cache.get(_ticker_cache_key(alliance_id), ttl_seconds=TTL_CORP_ALLIANCE_INFO)
+        ticker = _valid_ticker(cached)
+        if ticker:
+            result[alliance_id] = ticker
+        else:
+            tasks.append(("alliance", alliance_id))
+
+    if not tasks:
         return result
 
-    missing: list[int] = []
-    for eve_id in unique_ids:
-        cache_key = f"esi:ticker:{eve_id}"
-        cached = cache.get(cache_key, ttl_seconds=TTL_CORP_ALLIANCE_INFO)
-        if cached is not None:
-            result[eve_id] = str(cached)
+    def fetch_one(kind: str, eve_id: int) -> tuple[int, str]:
+        if kind == "alliance":
+            info = get_alliance_info(eve_id)
         else:
-            missing.append(eve_id)
+            info = get_corporation_info(eve_id)
 
-    for idx in range(0, len(missing), ESI_BATCH_CHUNK):
-        chunk = missing[idx:idx + ESI_BATCH_CHUNK]
-        if not chunk:
-            continue
+        if not isinstance(info, dict):
+            return eve_id, ""
 
-        try:
-            data = post_json(
-                f"{ESI_URL}/universe/names/",
-                chunk,
-                user_agent=USER_AGENT,
-                timeout=TIMEOUT,
-                retries=1,
-            )
+        ticker = _valid_ticker(info.get("ticker"))
+        if ticker:
+            cache.set(_ticker_cache_key(eve_id), ticker)
+        return eve_id, ticker
 
-            for item in data or []:
-                if not isinstance(item, dict):
-                    continue
-                category = item.get("category")
-                eve_id = _safe_int(item.get("id"))
-                name = item.get("name")
-                if eve_id and category in ("corporation", "alliance") and name:
-                    result[eve_id] = str(name)
-                    cache.set(f"esi:ticker:{eve_id}", str(name))
-        except Exception as e:
-            print("ESI batch names error:", e)
+    # ESI has no batch ticker endpoint. Use a small worker pool so prefetch is
+    # still fast without hammering ESI.
+    max_workers = min(8, max(1, len(tasks)))
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(fetch_one, kind, eve_id): (kind, eve_id)
+                for kind, eve_id in tasks
+            }
+            for future in as_completed(future_map):
+                kind, eve_id = future_map[future]
+                try:
+                    resolved_id, ticker = future.result()
+                    if ticker:
+                        result[resolved_id] = ticker
+                except Exception as e:
+                    print(f"ESI ticker resolve error: {kind} {eve_id}: {e}")
+    except Exception as e:
+        print("ESI ticker pool error:", e)
 
     return result
 
@@ -294,8 +331,8 @@ def get_alliance_info(alliance_id: int):
 
 
 def get_ally_or_corp(character_id: int):
-    # Fast path: after prefetch_local_pilots() warms the ticker cache, avoid
-    # the full corp/alliance info fetch entirely.
+    # Fast path: after prefetch_local_pilots() warms the real ticker cache,
+    # avoid the full corp/alliance info fetch entirely.
     character = get_character_info(character_id)
 
     if not character:
@@ -305,7 +342,7 @@ def get_ally_or_corp(character_id: int):
     alliance_id = character.get("alliance_id")
 
     if alliance_id:
-        cached_ticker = cache.get(f"esi:ticker:{alliance_id}", ttl_seconds=TTL_CORP_ALLIANCE_INFO)
+        cached_ticker = cache.get(_ticker_cache_key(alliance_id), ttl_seconds=TTL_CORP_ALLIANCE_INFO)
         if cached_ticker:
             return str(cached_ticker)
 
@@ -314,11 +351,11 @@ def get_ally_or_corp(character_id: int):
         if alliance:
             ticker = alliance.get("ticker", "?")
             if ticker and ticker != "?":
-                cache.set(f"esi:ticker:{alliance_id}", ticker)
+                cache.set(_ticker_cache_key(alliance_id), ticker)
             return ticker
 
     if corp_id:
-        cached_ticker = cache.get(f"esi:ticker:{corp_id}", ttl_seconds=TTL_CORP_ALLIANCE_INFO)
+        cached_ticker = cache.get(_ticker_cache_key(corp_id), ttl_seconds=TTL_CORP_ALLIANCE_INFO)
         if cached_ticker:
             return str(cached_ticker)
 
@@ -327,7 +364,7 @@ def get_ally_or_corp(character_id: int):
         if corp:
             ticker = corp.get("ticker", "?")
             if ticker and ticker != "?":
-                cache.set(f"esi:ticker:{corp_id}", ticker)
+                cache.set(_ticker_cache_key(corp_id), ticker)
             return ticker
 
     return "?"
@@ -344,8 +381,8 @@ def prefetch_local_pilots(pilot_names: list[str]) -> dict[str, int]:
       1. One POST /universe/ids/ for all names (chunked).
       2. For each resolved character_id: GET /characters/{id}/ (still per-id,
          ESI has no batch characters endpoint, but these are cached 6h).
-      3. Collect unique corp_id + alliance_id and resolve tickers via one
-         POST /universe/names/ (chunked). Warm the ticker cache so the
+      3. Collect unique corp_id + alliance_id and resolve real tickers via
+         corporation/alliance info endpoints. Warm the ticker cache so the
          per-pilot get_ally_or_corp() becomes a cache hit.
     """
     name_to_id = resolve_character_ids(pilot_names)
@@ -370,7 +407,7 @@ def prefetch_local_pilots(pilot_names: list[str]) -> dict[str, int]:
         if alliance_id:
             alliance_ids.add(alliance_id)
 
-    # Resolve tickers in bulk and warm the ticker cache. After this, each
+    # Resolve real tickers and warm the ticker cache. After this, each
     # per-pilot get_ally_or_corp() call is a pure cache hit.
     ticker_map = resolve_affiliation_tickers(list(corp_ids), list(alliance_ids))
 
@@ -378,6 +415,6 @@ def prefetch_local_pilots(pilot_names: list[str]) -> dict[str, int]:
     # used by get_corporation_info / get_alliance_info, so those also become
     # cache hits without re-fetching full corp info.
     for eve_id, ticker in ticker_map.items():
-        cache.set(f"esi:ticker:{eve_id}", ticker)
+        cache.set(_ticker_cache_key(eve_id), ticker)
 
     return name_to_id

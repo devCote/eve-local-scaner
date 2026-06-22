@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -10,6 +11,40 @@ from paths import EXE_DIR, SOURCE_DIR, user_data_path
 
 DB_RELATIVE_PATH = Path("data") / "local_intel.sqlite"
 _db_connection: sqlite3.Connection | None = None
+
+
+def _ensure_runtime_schema(conn: sqlite3.Connection) -> None:
+    """Create additive tables introduced after older DB versions.
+
+    This never rebuilds or deletes data. It only makes read-side helpers safe
+    when the updater has not run yet in the current process.
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS killmail_details (
+                killmail_id INTEGER PRIMARY KEY,
+                killmail_hash TEXT,
+                killmail_json TEXT NOT NULL,
+                zkb_json TEXT,
+                victim_items_json TEXT,
+                victim_damage_taken INTEGER DEFAULT 0,
+                victim_ship_type_id INTEGER,
+                destroyed_value REAL DEFAULT 0,
+                dropped_value REAL DEFAULT 0,
+                total_value REAL DEFAULT 0,
+                sequence_id INTEGER,
+                uploaded_at INTEGER,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_killmail_details_hash "
+            "ON killmail_details(killmail_hash)"
+        )
+        conn.commit()
+    except Exception as exc:
+        print(f"[LOCAL DB] runtime schema skipped: {exc}")
 
 
 def get_db_path() -> Path:
@@ -57,6 +92,8 @@ def connect() -> sqlite3.Connection | None:
         cur.execute("PRAGMA temp_store=MEMORY")
     except Exception:
         pass
+
+    _ensure_runtime_schema(_db_connection)
     return _db_connection
 
 
@@ -86,6 +123,96 @@ def table_exists(table_name: str) -> bool:
         (table_name,),
     )
     return row is not None
+
+
+
+def _json_load(value: Any, fallback):
+    if value is None:
+        return fallback
+    try:
+        data = json.loads(str(value))
+        return data
+    except Exception:
+        return fallback
+
+
+def _zkb_from_detail_row(row: sqlite3.Row | None) -> dict:
+    if not row:
+        return {}
+    zkb = _json_load(row["zkb_json"] if "zkb_json" in row.keys() else None, {})
+    if not isinstance(zkb, dict):
+        zkb = {}
+    for key, column in (
+        ("destroyedValue", "destroyed_value"),
+        ("droppedValue", "dropped_value"),
+        ("totalValue", "total_value"),
+    ):
+        try:
+            value = row[column]
+            if value is not None and key not in zkb:
+                zkb[key] = value
+        except Exception:
+            pass
+    try:
+        if row["killmail_hash"] and "hash" not in zkb:
+            zkb["hash"] = row["killmail_hash"]
+    except Exception:
+        pass
+    return zkb
+
+
+def get_killmail_detail(killmail_id: int) -> dict | None:
+    """Full/minimal local killmail payload for fit popup.
+
+    Returns None if the DB does not have this killmail yet. Older DBs without
+    killmail_details are handled safely.
+    """
+    try:
+        killmail_id = int(killmail_id)
+    except Exception:
+        return None
+    if not killmail_id or not table_exists("killmail_details"):
+        return None
+
+    row = _fetchone(
+        """
+        SELECT killmail_id, killmail_hash, killmail_json, zkb_json,
+               victim_items_json, victim_damage_taken, victim_ship_type_id,
+               destroyed_value, dropped_value, total_value, sequence_id,
+               uploaded_at, updated_at
+        FROM killmail_details
+        WHERE killmail_id = ?
+        LIMIT 1
+        """,
+        (killmail_id,),
+    )
+    if not row:
+        return None
+
+    killmail = _json_load(row["killmail_json"], {})
+    zkb = _zkb_from_detail_row(row)
+    victim_items = _json_load(row["victim_items_json"], [])
+
+    if not isinstance(killmail, dict):
+        killmail = {}
+    if not isinstance(victim_items, list):
+        victim_items = []
+
+    return {
+        "killmail_id": int(row["killmail_id"]),
+        "killmail_hash": row["killmail_hash"],
+        "killmail": killmail,
+        "zkb": zkb,
+        "victim_items": victim_items,
+        "victim_damage_taken": int(row["victim_damage_taken"] or 0),
+        "victim_ship_type_id": row["victim_ship_type_id"],
+        "destroyed_value": float(row["destroyed_value"] or 0),
+        "dropped_value": float(row["dropped_value"] or 0),
+        "total_value": float(row["total_value"] or 0),
+        "sequence_id": row["sequence_id"],
+        "uploaded_at": row["uploaded_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def get_kill_count(character_id: int) -> int:
@@ -123,9 +250,15 @@ def get_recent_kills(character_id: int, limit: int = 10) -> list[dict]:
             km.victim_ship_type_id,
             km.solar_system_id,
             ka.final_blow,
-            ka.damage_done
+            ka.damage_done,
+            kd.killmail_hash,
+            kd.zkb_json,
+            kd.destroyed_value,
+            kd.dropped_value,
+            kd.total_value
         FROM killmail_attackers ka
         JOIN killmails km ON km.killmail_id = ka.killmail_id
+        LEFT JOIN killmail_details kd ON kd.killmail_id = km.killmail_id
         WHERE ka.attacker_character_id = ?
         ORDER BY km.killmail_time DESC
         LIMIT ?
@@ -135,9 +268,12 @@ def get_recent_kills(character_id: int, limit: int = 10) -> list[dict]:
 
     result = []
     for row in rows:
+        zkb = _zkb_from_detail_row(row)
         result.append(
             {
                 "killmail_id": row["killmail_id"],
+                "killmail_hash": row["killmail_hash"],
+                "hash": row["killmail_hash"],
                 "killmail_time": row["killmail_time"],
                 "victim": {
                     "character_id": row["victim_character_id"],
@@ -147,7 +283,7 @@ def get_recent_kills(character_id: int, limit: int = 10) -> list[dict]:
                 "attacker_character_id": row["attacker_character_id"],
                 "final_blow": bool(row["final_blow"]),
                 "damage_done": row["damage_done"],
-                "zkb": {},
+                "zkb": zkb,
             }
         )
     return result
@@ -157,14 +293,20 @@ def get_recent_losses(character_id: int, limit: int = 50) -> list[dict]:
     rows = _fetchall(
         """
         SELECT
-            killmail_id,
-            killmail_time,
-            victim_character_id,
-            victim_ship_type_id,
-            solar_system_id
-        FROM killmails
-        WHERE victim_character_id = ?
-        ORDER BY killmail_time DESC
+            km.killmail_id,
+            km.killmail_time,
+            km.victim_character_id,
+            km.victim_ship_type_id,
+            km.solar_system_id,
+            kd.killmail_hash,
+            kd.zkb_json,
+            kd.destroyed_value,
+            kd.dropped_value,
+            kd.total_value
+        FROM killmails km
+        LEFT JOIN killmail_details kd ON kd.killmail_id = km.killmail_id
+        WHERE km.victim_character_id = ?
+        ORDER BY km.killmail_time DESC
         LIMIT ?
         """,
         (int(character_id), int(limit)),
@@ -172,16 +314,19 @@ def get_recent_losses(character_id: int, limit: int = 50) -> list[dict]:
 
     result = []
     for row in rows:
+        zkb = _zkb_from_detail_row(row)
         result.append(
             {
                 "killmail_id": row["killmail_id"],
+                "killmail_hash": row["killmail_hash"],
+                "hash": row["killmail_hash"],
                 "killmail_time": row["killmail_time"],
                 "victim": {
                     "character_id": row["victim_character_id"],
                     "ship_type_id": row["victim_ship_type_id"],
                 },
                 "solar_system_id": row["solar_system_id"],
-                "zkb": {},
+                "zkb": zkb,
             }
         )
     return result

@@ -9,8 +9,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QRegion
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QRegion, QBrush, QRadialGradient
 from PySide6.QtWidgets import QApplication, QFrame, QPushButton
 
 from user_settings import load_ui_settings
@@ -19,6 +19,80 @@ from app_fonts import APP_FONT_FAMILY
 from zkill_fit_export import build_eft_fit_text
 from zkill_fit_fetcher import NativeFitFetchThread
 from zkill_fit_utils import format_isk_short, safe_int, transparency_to_alpha
+
+
+class PopupCloseButton(QPushButton):
+    """Small drawn close button matching the app title-bar close icon."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.text_color = QColor("#AEB4BC")
+        self.hover_color = QColor("#E6EEF6")
+        self.close_hover_color = QColor("#FF8A8A")
+
+        self.setFixedSize(20, 16)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setText("")
+        self.setFlat(True)
+        self.setMouseTracking(True)
+        self.setStyleSheet("""
+            QPushButton {
+                border: none;
+                background: transparent;
+                padding: 0px;
+                margin: 0px;
+            }
+            QPushButton:hover {
+                border: none;
+                background: transparent;
+            }
+            QPushButton:pressed {
+                border: none;
+                background: transparent;
+            }
+        """)
+
+    def set_colors(self, text_color: str):
+        color = QColor(text_color)
+        if color.isValid():
+            self.text_color = color
+        self.update()
+
+    def _draw_glow(self, painter: QPainter, color: QColor, radius: int = 9):
+        cx = self.width() / 2
+        cy = self.height() / 2
+
+        glow = QRadialGradient(cx, cy, radius)
+        c1 = QColor(color)
+        c1.setAlpha(90)
+        c2 = QColor(color)
+        c2.setAlpha(0)
+        glow.setColorAt(0.0, c1)
+        glow.setColorAt(1.0, c2)
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(glow))
+        painter.drawEllipse(int(cx - radius), int(cy - radius), radius * 2, radius * 2)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        if self.underMouse():
+            icon = QColor(self.close_hover_color)
+            self._draw_glow(painter, icon, 9)
+        else:
+            icon = QColor(self.text_color)
+            icon.setAlpha(215)
+
+        cx = self.width() / 2
+        cy = self.height() / 2
+        size = 4.0
+
+        painter.setPen(QPen(icon, 1.35, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawLine(QPointF(cx - size, cy - size), QPointF(cx + size, cy + size))
+        painter.drawLine(QPointF(cx + size, cy - size), QPointF(cx - size, cy + size))
+        painter.end()
 
 
 class FittingPanelPopup(QFrame):
@@ -71,6 +145,12 @@ class FittingPanelPopup(QFrame):
         self._apply_save_fit_button_style()
         self.save_fit_button.hide()
 
+        self.close_button = PopupCloseButton(self)
+        self.close_button.clicked.connect(self._close_popup)
+        self.close_button.installEventFilter(self)
+        self._apply_close_button_style()
+        self.close_button.show()
+
     def _apply_save_fit_button_style(self):
         frame = QColor(self._ui_frame_color)
         if not frame.isValid():
@@ -102,7 +182,7 @@ class FittingPanelPopup(QFrame):
             f"background-color: rgba({br}, {bg_g}, {bb}, 210);"
             f"color: rgba({tr}, {tg}, {tb}, 245);"
             f"border: 1px solid rgba({r}, {g}, {b}, 190);"
-            "border-radius: 5px; padding: 1px 10px; font-family: '{APP_FONT_FAMILY}'; font-size: 10px; font-weight: 600;"
+            f"border-radius: 5px; padding: 1px 10px; font-family: '{APP_FONT_FAMILY}'; font-size: 10px; font-weight: 600;"
             "}"
             "QPushButton:hover {"
             f"background-color: rgba({hover_r}, {hover_g}, {hover_b}, 225);"
@@ -113,6 +193,9 @@ class FittingPanelPopup(QFrame):
             f"background-color: rgba({pressed_r}, {pressed_g}, {pressed_b}, 235);"
             "}"
         )
+
+    def _apply_close_button_style(self):
+        self.close_button.set_colors(self._ui_text_color)
 
     def _advance_loading_animation(self):
         if not self._loading:
@@ -133,6 +216,10 @@ class FittingPanelPopup(QFrame):
 
     def _layout_button(self):
         self.save_fit_button.setGeometry(144, 94, 110, 24)
+        # Keep the close icon inside the circular mask, near the right-top
+        # area like the main window close button.
+        self.close_button.setGeometry(max(0, self.width() - 86), 62, 20, 16)
+        self.close_button.raise_()
 
     def _copy_fit_to_clipboard(self):
         fit_data = self._fit_data if isinstance(self._fit_data, dict) else {}
@@ -169,6 +256,7 @@ class FittingPanelPopup(QFrame):
         self._panel_pixmaps = {}
         self._apply_owner_visual_settings(owner_widget)
         self._apply_save_fit_button_style()
+        self._apply_close_button_style()
         self._apply_circle_mask()
         self._layout_button()
         self._move_near_owner(owner_widget)
@@ -176,6 +264,8 @@ class FittingPanelPopup(QFrame):
         QTimer.singleShot(0, self._apply_window_blur)
         QTimer.singleShot(80, self._apply_window_blur)
         self.save_fit_button.hide()
+        self.close_button.show()
+        self.close_button.raise_()
         self.update()
 
         if self._thread and self._thread.isRunning():
@@ -245,14 +335,17 @@ class FittingPanelPopup(QFrame):
         self.hide()
         self._owner_widget = None
 
+    def _close_popup(self):
+        self.hide_panel(force=True)
+        self.mouseLeft.emit()
+
     def enterEvent(self, event):
         self._mouse_inside = True
         super().enterEvent(event)
 
     def _close_on_right_middle_event(self, event) -> bool:
         if event.type() == QEvent.MouseButtonPress and event.button() in (Qt.RightButton, Qt.MiddleButton):
-            self.hide_panel(force=True)
-            self.mouseLeft.emit()
+            self._close_popup()
             event.accept()
             return True
         return False
@@ -281,11 +374,15 @@ class FittingPanelPopup(QFrame):
 
     def leaveEvent(self, event):
         self._mouse_inside = False
-        self._hovered_module_name = ""
-        # When the user pinned the popup by clicking a ship, leaving the popup
-        # is the explicit close event.
-        self.hide_panel(force=True)
-        self.mouseLeft.emit()
+        if self._hovered_module_name:
+            self._hovered_module_name = ""
+            self.update()
+        # Do not close the pinned fit popup when the mouse leaves it.
+        # It now closes only by:
+        #   - the top-right x button;
+        #   - right click inside the popup;
+        #   - middle click inside the popup;
+        #   - explicit close from parent/tab/window logic.
         super().leaveEvent(event)
 
     def follow_owner_position(self):

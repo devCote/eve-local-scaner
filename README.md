@@ -228,3 +228,8 @@ It does not automate gameplay and does not control the EVE Online client.
 ## License
 
 Add your license here.
+
+
+### Local type names
+
+The app uses `types.json` as the local type-name source for ships, structures, deployables, modules, ammo, drones, fighters, implants, rigs, subsystems and skin/items. `ships.json` is no longer required.

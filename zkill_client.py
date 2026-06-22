@@ -1,10 +1,10 @@
 """Hybrid zKill-compatible data access.
 
-- Danger/Gang/Solo/Top Ships are read from zKillboard stats API, like before.
+Current source policy:
+- Danger/Gang/Solo/Top Ships are read from zKillboard all-time stats API.
 - Cyno check and recent kill/loss lists are read from local data/local_intel.sqlite.
 
-This keeps the UI stats identical to old zKill behavior while avoiding heavy zKill/ESI
-requests for cyno scanning.
+This keeps the Danger column identical to zKillboard all-time dangerRatio.
 """
 
 import json
@@ -20,7 +20,7 @@ from local_intel_db import (
     print_local_db_health,
 )
 
-USER_AGENT = "EVE-Local-Scanner"
+USER_AGENT = "EVE-Local-Intel-Scanner/2.0.0 (+https://github.com/devCote/eve-local-scaner)"
 ZKILL_URL = "https://zkillboard.com/api"
 ESI_URL = "https://esi.evetech.net/latest"
 TIMEOUT = 8
@@ -76,9 +76,10 @@ def get_full_killmail(killmail_id: int, killmail_hash: str | None = None):
 
 
 def get_zkill_stats(character_id: int):
-    """Stats from zKillboard API, like the old app behavior.
+    """All-time zKillboard stats.
 
-    This restores dangerRatio / gangRatio / soloRatio / topAllTime to zKill values.
+    Danger must match zKillboard, so this intentionally does not use local
+    character_stats. The local DB is still used for recent rows/cyno/popup data.
     """
     cache_key = f"zkill:stats:{character_id}"
     url = f"{ZKILL_URL}/stats/characterID/{character_id}/"
@@ -90,11 +91,11 @@ def get_zkill_stats(character_id: int):
             "gangRatio": 0,
             "soloRatio": 0,
             "topAllTime": [],
-            "_source": "zkill stats unavailable",
+            "_source": "zkillboard stats unavailable",
         }
 
     if isinstance(stats, dict):
-        stats["_source"] = "zkillboard stats api"
+        stats["_source"] = "zkillboard all-time stats api"
 
     return stats
 

@@ -7,8 +7,8 @@ from PySide6.QtGui import QFont, QFontDatabase
 from paths import resource_path
 
 
-APP_FONT_FAMILY = "Bahnschrift"
-FALLBACK_FONT_FAMILY = "Segoe UI"
+APP_FONT_FAMILY = "Anthropic Serif"
+FALLBACK_FONT_FAMILY = "Georgia"
 
 _FONT_LOADED_FAMILY: str | None = None
 
@@ -27,17 +27,28 @@ def _font_exists(family: str) -> bool:
 def _candidate_font_files() -> list[Path]:
     """Font files are not bundled here.
 
-    Put your own font file into one of these paths if the system font is missing:
-      assets/fonts/Bahnschrift.ttf
-      assets/fonts/Bahnschrift.otf
-      assets/fonts/bahnschrift.ttf
-      assets/fonts/bahnschrift.otf
+    To use Anthropic Serif in the app, either install it in Windows or place
+    your own font file into assets/fonts before building/running.
+
+    Supported example names:
+      assets/fonts/AnthropicSerif.ttf
+      assets/fonts/AnthropicSerif.otf
+      assets/fonts/AnthropicSerif-Regular.ttf
+      assets/fonts/AnthropicSerif-Regular.otf
+      assets/fonts/Anthropic Serif.ttf
+      assets/fonts/Anthropic Serif.otf
     """
     names = (
-        "Bahnschrift.ttf",
-        "Bahnschrift.otf",
-        "bahnschrift.ttf",
-        "bahnschrift.otf",
+        "AnthropicSerif.ttf",
+        "AnthropicSerif.otf",
+        "AnthropicSerif-Regular.ttf",
+        "AnthropicSerif-Regular.otf",
+        "Anthropic Serif.ttf",
+        "Anthropic Serif.otf",
+        "anthropic-serif.ttf",
+        "anthropic-serif.otf",
+        "anthropic_serif.ttf",
+        "anthropic_serif.otf",
     )
 
     paths: list[Path] = []
@@ -50,7 +61,7 @@ def _candidate_font_files() -> list[Path]:
 
 
 def resolve_app_font_family() -> str:
-    """Use Bahnschrift if available, otherwise try assets/fonts, otherwise fallback."""
+    """Use Anthropic Serif if available, otherwise try assets/fonts, otherwise fallback."""
     global _FONT_LOADED_FAMILY
 
     if _FONT_LOADED_FAMILY:

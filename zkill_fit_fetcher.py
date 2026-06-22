@@ -8,6 +8,8 @@ from PySide6.QtCore import QThread, Signal
 
 from app_http_client import get_bytes, get_json, post_json
 from cache import cache
+from local_intel_db import get_killmail_detail
+from type_names import get_local_type_name
 from zkill_client import TIMEOUT, USER_AGENT
 from zkill_fit_utils import (
     FITTING_TTL_SECONDS,
@@ -228,6 +230,10 @@ def _resolve_single_type_name(type_id: int) -> str:
     if not type_id:
         return ""
 
+    local_name = get_local_type_name(type_id)
+    if local_name:
+        return local_name
+
     for cache_key in (f"esi:type_name:{type_id}", f"esi:type-name:{type_id}"):
         cached = cache.get(cache_key, ttl_seconds=30 * 24 * 3600)
         if cached and not str(cached).strip().lower().startswith("type "):
@@ -256,6 +262,11 @@ def _resolve_type_names(type_ids: list[int]) -> dict[int, str]:
     result: dict[int, str] = {}
     missing: list[int] = []
     for type_id in ids:
+        local_name = get_local_type_name(type_id)
+        if local_name:
+            result[type_id] = local_name
+            continue
+
         cached = cache.get(f"esi:type_name:{type_id}", ttl_seconds=30 * 24 * 3600)
         if cached and not str(cached).strip().lower().startswith("type "):
             result[type_id] = str(cached)
@@ -291,6 +302,40 @@ def _resolve_type_names(type_ids: list[int]) -> dict[int, str]:
     return result
 
 
+
+def _load_local_killmail_for_popup(killmail_id: int) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return (killmail, zkb_summary) from local SQLite details if available."""
+    try:
+        detail = get_killmail_detail(int(killmail_id))
+    except Exception:
+        detail = None
+
+    if not isinstance(detail, dict):
+        return None
+
+    killmail = detail.get("killmail")
+    if not isinstance(killmail, dict) or not killmail.get("victim"):
+        return None
+
+    zkb = detail.get("zkb") if isinstance(detail.get("zkb"), dict) else {}
+    if not isinstance(zkb, dict):
+        zkb = {}
+
+    # Ensure values exist even if zkb_json was empty.
+    for key, detail_key in (
+        ("destroyedValue", "destroyed_value"),
+        ("droppedValue", "dropped_value"),
+        ("totalValue", "total_value"),
+    ):
+        if key not in zkb and detail.get(detail_key) is not None:
+            zkb[key] = detail.get(detail_key)
+
+    if detail.get("killmail_hash") and "hash" not in zkb:
+        zkb["hash"] = detail.get("killmail_hash")
+
+    return killmail, zkb
+
+
 class NativeFitFetchThread(QThread):
     loaded = Signal(int, object)
     failed = Signal(int, str)
@@ -307,9 +352,14 @@ class NativeFitFetchThread(QThread):
             return
 
         try:
-            kill_hash = _resolve_killmail_hash(killmail_id, self.row_data)
-            killmail = _load_full_killmail(killmail_id, kill_hash)
-            zkb_summary = _load_zkb_kill_summary(killmail_id, self.row_data)
+            local_payload = _load_local_killmail_for_popup(killmail_id)
+            if local_payload:
+                killmail, zkb_summary = local_payload
+            else:
+                kill_hash = _resolve_killmail_hash(killmail_id, self.row_data)
+                killmail = _load_full_killmail(killmail_id, kill_hash)
+                zkb_summary = _load_zkb_kill_summary(killmail_id, self.row_data)
+
             victim = killmail.get("victim") if isinstance(killmail.get("victim"), dict) else {}
             ship_type_id = safe_int(victim.get("ship_type_id") or self.row_data.get("ship_type_id"))
             fit_items = _extract_fit_items(victim.get("items") or [])

@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 import requests
 
-DEFAULT_USER_AGENT = "EVE-Local-Scanner"
+DEFAULT_USER_AGENT = "EVE-Local-Intel-Scanner/2.0.0 (+https://github.com/devCote/eve-local-scaner)"
 DEFAULT_TIMEOUT = 8
 RETRY_STATUS_CODES = {420, 429, 500, 502, 503, 504}
 
@@ -20,7 +20,10 @@ _SESSION = requests.Session()
 
 
 def _headers(user_agent: str | None = None, accept_json: bool = True) -> dict[str, str]:
-    headers = {"User-Agent": user_agent or DEFAULT_USER_AGENT}
+    headers = {
+        "User-Agent": user_agent or DEFAULT_USER_AGENT,
+        "Accept-Encoding": "gzip, deflate",
+    }
     if accept_json:
         headers["Accept"] = "application/json"
     return headers
@@ -51,6 +54,17 @@ def request(
                 timeout=timeout,
                 **kwargs,
             )
+            # ESI publishes an error-limit budget. If we are near the floor,
+            # pause briefly before returning so future calls do not immediately
+            # trip the limit. This is intentionally conservative and tiny.
+            try:
+                remain = int(response.headers.get("X-ESI-Error-Limit-Remain", "100"))
+                reset = int(response.headers.get("X-ESI-Error-Limit-Reset", "0"))
+                if remain <= 5 and reset > 0:
+                    time.sleep(min(max(reset, 1), 5))
+            except Exception:
+                pass
+
             if response.status_code not in RETRY_STATUS_CODES or attempt >= retries:
                 return response
         except Exception as exc:

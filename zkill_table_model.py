@@ -8,7 +8,8 @@ import sqlite3
 from cache import cache
 from app_http_client import get_bytes, get_json, post_json
 from paths import user_data_path
-from ship_names import get_ship_name as get_local_ship_name
+from local_intel_db import get_killmail_detail
+from type_names import get_local_type_name
 from zkill_client import ESI_URL, USER_AGENT, get_full_killmail
 
 TTL_ESI = 24 * 60 * 60
@@ -50,6 +51,10 @@ def get_type_name(type_id: int) -> str:
 
     cache_key = f"esi:type-name:{type_id}"
     alt_cache_key = f"esi:type_name:{type_id}"
+
+    local_name = get_local_type_name(type_id)
+    if local_name:
+        return local_name
 
     for key in (cache_key, alt_cache_key):
         cached = cache.get(key, ttl_seconds=TTL_ESI)
@@ -96,23 +101,19 @@ def shorten_ship_name(name: str) -> str:
 def get_ship_name(type_id: int) -> str:
     """Name for the Ship column.
 
-    First use local ships.json for speed. If it returns "Type ####", the victim
-    is likely a structure/deployable/non-ship missing from ships.json, so fall
-    back to ESI /universe/types/{type_id}/ and show the real type name.
+    types.json is the local source for all EVE inventory types now: ships,
+    structures, deployables, modules, ammo, drones, fighters, implants, rigs,
+    subsystems and skin/items. ESI is only a fallback if types.json misses an ID.
     """
     type_id = _safe_int(type_id)
     if not type_id:
         return "Unknown"
 
-    local_name = shorten_ship_name(get_local_ship_name(type_id))
-    if local_name and not local_name.lower().startswith("type "):
-        return local_name
-
     resolved_name = shorten_ship_name(get_type_name(type_id))
     if resolved_name and not resolved_name.lower().startswith("type "):
         return resolved_name
 
-    return local_name or f"Type {type_id}"
+    return f"Type {type_id}"
 
 
 def get_character_name(character_id: int) -> str:
@@ -260,7 +261,18 @@ def _extract_hash(recent_item: dict) -> str:
 def get_killmail_data(killmail_id: int, killmail_hash: str) -> dict | None:
     killmail_id = _safe_int(killmail_id)
     killmail_hash = str(killmail_hash or "").strip()
-    if not killmail_id or not killmail_hash:
+    if not killmail_id:
+        return None
+
+    # Fast path: full killmail payload imported from EVE Ref/R2Z2.
+    try:
+        detail = get_killmail_detail(killmail_id)
+        if isinstance(detail, dict) and isinstance(detail.get("killmail"), dict):
+            return detail["killmail"]
+    except Exception:
+        pass
+
+    if not killmail_hash:
         return None
 
     cache_key = f"esi:killmail-full:{killmail_id}:{killmail_hash}"

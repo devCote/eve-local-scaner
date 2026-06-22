@@ -9,8 +9,9 @@ datas = []
 if (project_dir / "assets").exists():
     datas.append(("assets", "assets"))
 
-if (project_dir / "ships.json").exists():
-    datas.append(("ships.json", "."))
+
+if (project_dir / "types.json").exists():
+    datas.append(("types.json", "."))
 
 # zKill is rendered by the native/API viewer now.
 # Do not package old browser loader scripts or QtWebEngine assets.
