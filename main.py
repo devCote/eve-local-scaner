@@ -19,7 +19,8 @@ from local_intel_updater import ensure_local_intel_ready
 from local_intel_db import get_db_path
 from logger_setup import setup_file_logging
 from crash_handler import install_crash_handler
-from app_fonts import make_app_font, resolve_app_font_family
+from user_settings import load_ui_settings
+from app_fonts import make_app_font, resolve_app_font_family, set_app_font_family
 
 
 def set_windows_app_id():
@@ -181,8 +182,10 @@ def main() -> int:
     ensure_user_data_dirs()
 
     app = QApplication(sys.argv)
-    app.setFont(make_app_font(10))
-    resolve_app_font_family()
+    startup_ui_settings = load_ui_settings()
+    startup_font_family = set_app_font_family(startup_ui_settings.get("font_family", "Anthropic Serif"))
+    app.setFont(make_app_font(10, startup_font_family))
+    resolve_app_font_family(startup_font_family)
 
     app_icon = get_app_icon()
     if not app_icon.isNull():

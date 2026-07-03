@@ -1,5 +1,6 @@
-from PySide6.QtCore import Qt, Signal, QPoint, QRect, QSize, QTimer
-from PySide6.QtGui import QColor
+import os
+from PySide6.QtCore import Qt, Signal, QPoint, QRect, QSize, QTimer, QUrl
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -10,13 +11,21 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QFrame,
     QCheckBox,
+    QComboBox,
     QScrollArea,
     QLayout,
     QSizePolicy,
 )
 
 from user_settings import DEFAULT_UI_SETTINGS
-from app_fonts import APP_FONT_FAMILY
+from app_fonts import (
+    APP_FONT_FAMILY,
+    available_font_families,
+    ensure_user_fonts_dir,
+    get_app_font_family,
+    refresh_app_fonts,
+    set_app_font_family,
+)
 
 
 class FlowLayout(QLayout):
@@ -107,8 +116,8 @@ class FlowLayout(QLayout):
 
 
 class OptionsPanel(QWidget):
-    # transparency, blur, font_size, compact_zkill, frame_color, text_color, bg_color
-    settingsChanged = Signal(int, int, int, int, str, str, str)
+    # transparency, blur, font_size, compact_zkill, frame_color, text_color, bg_color, font_family
+    settingsChanged = Signal(int, int, int, int, str, str, str, str)
     clearDataRequested = Signal()
     healthCheckRequested = Signal()
     generalTableRequested = Signal()
@@ -119,6 +128,7 @@ class OptionsPanel(QWidget):
         self.transparency = DEFAULT_UI_SETTINGS["transparency"]
         self.blur = DEFAULT_UI_SETTINGS["blur"]
         self.font_size = DEFAULT_UI_SETTINGS["font_size"]
+        self.font_family = set_app_font_family(str(DEFAULT_UI_SETTINGS.get("font_family", APP_FONT_FAMILY)))
         self.compact_zkill = DEFAULT_UI_SETTINGS.get("compact_zkill", 0)
         self.frame_color = DEFAULT_UI_SETTINGS["frame_color"]
         self.text_color = DEFAULT_UI_SETTINGS["text_color"]
@@ -185,10 +195,27 @@ class OptionsPanel(QWidget):
         self.font_row.addWidget(self.font_slider, 1)
         layout.addLayout(self.font_row)
 
+        self.font_family_label = QLabel("Font:")
+        self.font_family_label.setObjectName("OptionSliderLabel")
+        self.font_combo = QComboBox()
+        self.font_combo.setObjectName("FontCombo")
+        self.font_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.reload_font_combo(self.font_family)
+        self.font_combo.currentTextChanged.connect(self.on_font_family_changed)
+
+        self.font_family_row = QHBoxLayout()
+        self.font_family_row.setContentsMargins(0, 0, 0, 0)
+        self.font_family_row.setSpacing(10)
+        self.font_family_row.addWidget(self.font_family_label, 0)
+        self.font_family_row.addWidget(self.font_combo, 1)
+        layout.addLayout(self.font_family_row)
+
         self.default_button = QPushButton("Default")
         self.frame_button = QPushButton("Frame color")
         self.text_button = QPushButton("Text color")
         self.bg_button = QPushButton("Background color")
+        self.open_fonts_button = QPushButton("Open Fonts Folder")
+        self.refresh_fonts_button = QPushButton("Refresh Fonts")
 
         self.general_table_button = QPushButton("General Table")
         self.clear_data_button = QPushButton("Clear local data/cache")
@@ -199,6 +226,8 @@ class OptionsPanel(QWidget):
         self.frame_button.clicked.connect(self.pick_frame_color)
         self.text_button.clicked.connect(self.pick_text_color)
         self.bg_button.clicked.connect(self.pick_bg_color)
+        self.open_fonts_button.clicked.connect(self.open_fonts_folder)
+        self.refresh_fonts_button.clicked.connect(self.refresh_font_list)
 
         self.general_table_button.clicked.connect(self.generalTableRequested.emit)
         self.clear_data_button.clicked.connect(self.clearDataRequested.emit)
@@ -210,6 +239,8 @@ class OptionsPanel(QWidget):
             self.frame_button,
             self.text_button,
             self.bg_button,
+            self.open_fonts_button,
+            self.refresh_fonts_button,
             self.general_table_button,
             self.clear_data_button,
             self.health_button,
@@ -263,6 +294,29 @@ class OptionsPanel(QWidget):
         line.setStyleSheet("color: #343840;")
         return line
 
+    def reload_font_combo(self, selected: str | None = None):
+        if not hasattr(self, "font_combo"):
+            return
+
+        selected = str(selected or self.font_family or APP_FONT_FAMILY)
+        fonts = available_font_families()
+        if selected and selected not in fonts:
+            fonts.insert(0, selected)
+
+        self.font_combo.blockSignals(True)
+        self.font_combo.clear()
+        self.font_combo.addItems(fonts)
+
+        index = self.font_combo.findText(selected)
+        if index < 0:
+            resolved = get_app_font_family()
+            index = self.font_combo.findText(resolved)
+
+        if index >= 0:
+            self.font_combo.setCurrentIndex(index)
+
+        self.font_combo.blockSignals(False)
+
     def update_labels(self):
         self.transparency_label.setText(f"Transparency: {self.transparency}%")
         self.font_label.setText(f"Font size: {self.font_size} pt")
@@ -272,7 +326,7 @@ class OptionsPanel(QWidget):
             QWidget {{
                 background: transparent;
                 color: {self.text_color};
-                font-family: '{APP_FONT_FAMILY}';
+                font-family: '{get_app_font_family()}';
                 font-size: {self.font_size}pt;
             }}
 
@@ -294,7 +348,7 @@ class OptionsPanel(QWidget):
             QLabel {{
                 color: {self.text_color};
                 background: transparent;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self.font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {self.font_size}pt;
             }}
 
             QPushButton {{
@@ -302,7 +356,7 @@ class OptionsPanel(QWidget):
                 color: {self.text_color};
                 border: 1px solid {self.frame_color};
                 padding: 4px 8px;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self.font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {self.font_size}pt;
             }}
 
             QPushButton:hover {{
@@ -323,11 +377,35 @@ class OptionsPanel(QWidget):
                 border: 1px solid rgba(255, 125, 130, 245);
             }}
 
+            QComboBox {{
+                background-color: rgba(24, 26, 30, 180);
+                color: {self.text_color};
+                border: 1px solid {self.frame_color};
+                border-radius: 4px;
+                padding: 3px 8px;
+                min-height: 20px;
+                font-family: '{get_app_font_family()}'; font-size: {self.font_size}pt;
+            }}
+
+            QComboBox:hover {{
+                background-color: rgba(42, 46, 54, 220);
+                border: 1px solid #69707a;
+            }}
+
+            QComboBox QAbstractItemView {{
+                background-color: rgba(11, 11, 11, 245);
+                color: {self.text_color};
+                border: 1px solid {self.frame_color};
+                selection-background-color: rgba(57, 199, 181, 95);
+                selection-color: #ffffff;
+                font-family: '{get_app_font_family()}'; font-size: {self.font_size}pt;
+            }}
+
             QCheckBox {{
                 color: {self.text_color};
                 background: transparent;
                 spacing: 7px;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self.font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {self.font_size}pt;
             }}
 
             QCheckBox::indicator {{
@@ -345,7 +423,7 @@ class OptionsPanel(QWidget):
             QLabel#OptionSliderLabel {{
                 color: {self.text_color};
                 background: transparent;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self.font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {self.font_size}pt;
                 min-width: 112px;
             }}
 
@@ -427,6 +505,7 @@ class OptionsPanel(QWidget):
         frame_color="#161616",
         text_color="#d6d6d6",
         bg_color="#0b0b0b",
+        font_family=None,
         emit=False,
     ):
         self._loading_values = True
@@ -438,11 +517,13 @@ class OptionsPanel(QWidget):
         self.frame_color = str(frame_color).lower()
         self.text_color = str(text_color).lower()
         self.bg_color = str(bg_color).lower()
+        self.font_family = set_app_font_family(str(font_family or self.font_family or APP_FONT_FAMILY).strip())
 
         self.transparency_slider.setValue(self.transparency)
         self.font_slider.setValue(self.font_size)
         self.blur_check.setChecked(bool(self.blur))
         self.compact_zkill_check.setChecked(bool(self.compact_zkill))
+        self.reload_font_combo(self.font_family)
 
         self._loading_values = False
 
@@ -457,6 +538,7 @@ class OptionsPanel(QWidget):
             return
 
         self.update_labels()
+        self.font_family = set_app_font_family(self.font_family)
         self.apply_local_style()
 
         self.settingsChanged.emit(
@@ -467,6 +549,7 @@ class OptionsPanel(QWidget):
             self.frame_color,
             self.text_color,
             self.bg_color,
+            self.font_family,
         )
 
     def on_transparency_changed(self, value):
@@ -485,6 +568,31 @@ class OptionsPanel(QWidget):
         self.font_size = int(value)
         self.emit_settings()
 
+    def on_font_family_changed(self, value):
+        if self._loading_values:
+            return
+        value = str(value or "").strip()
+        if not value:
+            return
+        self.font_family = value
+        self.emit_settings()
+
+    def open_fonts_folder(self):
+        path = ensure_user_fonts_dir()
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(str(path))
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        except Exception as e:
+            print(f"[FONT] failed to open fonts folder: {e}")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def refresh_font_list(self):
+        refresh_app_fonts()
+        self.reload_font_combo(self.font_family)
+        self.emit_settings()
+
     def reset_defaults(self):
         defaults = DEFAULT_UI_SETTINGS
         self.set_values(
@@ -495,6 +603,7 @@ class OptionsPanel(QWidget):
             defaults["frame_color"],
             defaults["text_color"],
             defaults["bg_color"],
+            defaults.get("font_family", APP_FONT_FAMILY),
             emit=True,
         )
 

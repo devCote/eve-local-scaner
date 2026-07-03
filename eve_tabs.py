@@ -1,7 +1,7 @@
 from PySide6.QtCore import Signal, Qt, QPoint
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSizePolicy
 
-from app_fonts import APP_FONT_FAMILY
+from app_fonts import get_app_font_family
 
 
 class EveTabs(QWidget):
@@ -221,7 +221,7 @@ class EveTabs(QWidget):
 
         for button in list(self.buttons.values()) + list(getattr(self, "zkill_mode_buttons", {}).values()):
             font = button.font()
-            font.setFamily(APP_FONT_FAMILY)
+            font.setFamily(get_app_font_family())
             font.setPointSize(font_size)
             button.setFont(font)
 
@@ -236,7 +236,7 @@ class EveTabs(QWidget):
                 color: {text_color};
                 border: 1px solid transparent;
                 padding: 0px {main_pad}px;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {font_size}pt;
             }}
 
             QPushButton#MainTabButton:hover {{
@@ -257,7 +257,7 @@ class EveTabs(QWidget):
                 border: 0px;
                 padding: 0px {mode_pad}px;
                 margin-left: 1px;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {font_size}pt;
             }}
 
             QPushButton#ZkillModeButton:hover {{

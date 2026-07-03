@@ -11,6 +11,7 @@ DEFAULT_UI_SETTINGS: dict[str, Any] = {
     "transparency": 10,
     "blur": 0,
     "font_size": 10,
+    "font_family": "Anthropic Serif",
     "compact_zkill": 0,
     "frame_color": "#161616",
     "text_color": "#d6d6d6",
@@ -109,6 +110,13 @@ def normalize_color(value: Any, default: str) -> str:
     return default
 
 
+def normalize_font_family(value: Any, default: str) -> str:
+    value = str(value or "").strip().replace('"', "").replace("'", "")
+    if not value:
+        return default
+    return value[:120]
+
+
 def normalize_ui_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     raw = raw or {}
     defaults = DEFAULT_UI_SETTINGS
@@ -126,6 +134,10 @@ def normalize_ui_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
             defaults["font_size"],
             8,
             11,
+        ),
+        "font_family": normalize_font_family(
+            raw.get("font_family", defaults["font_family"]),
+            defaults["font_family"],
         ),
         "compact_zkill": 1 if bool(raw.get("compact_zkill", defaults["compact_zkill"])) else 0,
         "frame_color": normalize_color(

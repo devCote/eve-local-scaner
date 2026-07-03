@@ -1,10 +1,10 @@
-from app_fonts import APP_FONT_FAMILY
+from app_fonts import get_app_font_family
 
 
 def apply_eve_style(app):
     # Do not use an f-string for the whole QSS block: Qt CSS uses { } braces,
     # and Python would try to treat them as f-string expressions.
-    font_family = str(APP_FONT_FAMILY or "Georgia").replace('"', "").replace("'", "")
+    font_family = str(get_app_font_family() or "Georgia").replace('"', "").replace("'", "")
 
     qss = """
     QWidget {

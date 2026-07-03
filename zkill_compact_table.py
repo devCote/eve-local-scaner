@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app_fonts import APP_FONT_FAMILY
+from app_fonts import get_app_font_family
 
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QPalette, QPen
@@ -217,7 +217,7 @@ class KillsLossesTable(QTableWidget):
             header_obj.set_separator_color(self._frame_color)
 
         font = self.font()
-        font.setFamily(APP_FONT_FAMILY)
+        font.setFamily(get_app_font_family())
         font.setPointSize(int(self._font_size))
         self.setFont(font)
         self.viewport().setFont(font)
@@ -237,7 +237,7 @@ class KillsLossesTable(QTableWidget):
                 alternate-background-color: transparent;
                 color: {self._text_color};
                 border: 0px;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self._font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {self._font_size}pt;
                 selection-background-color: transparent;
                 selection-color: #FFFFFF;
             }}
@@ -248,7 +248,7 @@ class KillsLossesTable(QTableWidget):
                 padding-bottom: 0px;
                 border: 0px;
                 background-color: transparent;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self._font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {self._font_size}pt;
             }}
             QTableWidget::item:hover {{
                 background-color: transparent;
@@ -270,7 +270,7 @@ class KillsLossesTable(QTableWidget):
                 padding-top: 0px;
                 padding-bottom: 1px;
                 border: 0px;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self._font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {self._font_size}pt;
                 font-weight: normal;
                 text-align: left;
             }}

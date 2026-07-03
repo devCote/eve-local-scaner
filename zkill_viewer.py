@@ -17,7 +17,7 @@ from zkill_client import (
 )
 from zkill_compact_table import KillsLossesTable
 from zkill_fit_popup import FittingPanelPopup
-from app_fonts import APP_FONT_FAMILY
+from app_fonts import get_app_font_family
 from esi_client import TTL_CHARACTER_INFO, TTL_CORP_ALLIANCE_INFO
 
 from zkill_table_model import (
@@ -291,17 +291,17 @@ class ZKillViewer(QWidget):
 
         key_style = (
             f"color: {text_color}; font-weight: bold; background: transparent; "
-            f"font-family: '{APP_FONT_FAMILY}'; font-size: {size}pt; "
+            f"font-family: '{get_app_font_family()}'; font-size: {size}pt; "
             "padding: 0px; margin: 0px;"
         )
         default_value_style = (
             f"color: {text_color}; background: transparent; "
-            f"font-family: '{APP_FONT_FAMILY}'; font-size: {size}pt; "
+            f"font-family: '{get_app_font_family()}'; font-size: {size}pt; "
             "padding: 0px; margin: 0px;"
         )
         identity_value_style = (
             f"color: {identity_color}; background: transparent; "
-            f"font-family: '{APP_FONT_FAMILY}'; font-size: {size}pt; "
+            f"font-family: '{get_app_font_family()}'; font-size: {size}pt; "
             "padding: 0px; margin: 0px;"
         )
 
@@ -360,7 +360,7 @@ class ZKillViewer(QWidget):
                 margin: 0px;
                 border: 1px solid transparent;
                 border-bottom: 1px solid rgba(55, 67, 80, 120);
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self._font_size}pt;
+                font-family: '{get_app_font_family()}'; font-size: {self._font_size}pt;
             }}
             QTabBar::tab:selected {{
                 background-color: rgba(18, 24, 26, 210);
@@ -394,18 +394,18 @@ class ZKillViewer(QWidget):
             self.set_compact_zkill(bool(compact_zkill))
 
         font = self.font()
-        font.setFamily(APP_FONT_FAMILY)
+        font.setFamily(get_app_font_family())
         font.setPointSize(int(self._font_size))
         self.setFont(font)
 
         for label in self.findChildren(QLabel):
             label_font = label.font()
-            label_font.setFamily(APP_FONT_FAMILY)
+            label_font.setFamily(get_app_font_family())
             label_font.setPointSize(int(self._font_size))
             label.setFont(label_font)
 
         name_font = self.name_value.font()
-        name_font.setFamily(APP_FONT_FAMILY)
+        name_font.setFamily(get_app_font_family())
         name_font.setPointSize(int(self._font_size))
         name_font.setBold(True)
         self.name_value.setFont(name_font)
@@ -414,7 +414,7 @@ class ZKillViewer(QWidget):
         self._update_header_metrics()
 
         tab_font = self.tabs.font()
-        tab_font.setFamily(APP_FONT_FAMILY)
+        tab_font.setFamily(get_app_font_family())
         tab_font.setPointSize(int(self._font_size))
         self.tabs.setFont(tab_font)
         self.tabs.tabBar().setFont(tab_font)

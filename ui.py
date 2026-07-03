@@ -48,7 +48,7 @@ from row_renderer import (
 from window_resize import handle_resize_event
 from general_table_options import show_general_table_options_dialog
 from zkill_fit_popup import FittingPanelPopup
-from app_fonts import APP_FONT_FAMILY
+from app_fonts import get_app_font_family, set_app_font_family
 
 
 class EveLocalScanner(QWidget):
@@ -79,6 +79,8 @@ class EveLocalScanner(QWidget):
         self.ui_alpha = self.transparency_to_alpha(self.ui_transparency)
         self.ui_blur = int(self.user_settings["blur"])
         self.ui_font_size = max(8, min(11, int(self.user_settings["font_size"])))
+        self.ui_font_family = set_app_font_family(str(self.user_settings.get("font_family", "Anthropic Serif")))
+        self.ui_font_resolved = self.ui_font_family
         self.ui_compact_zkill = 1 if int(self.user_settings.get("compact_zkill", 0)) else 0
         self.ui_frame_color = self.user_settings["frame_color"]
         self.ui_text_color = self.user_settings["text_color"]
@@ -377,6 +379,7 @@ class EveLocalScanner(QWidget):
             self.ui_frame_color,
             self.ui_text_color,
             self.ui_bg_color,
+            self.ui_font_family,
             emit=False,
         )
 
@@ -399,6 +402,7 @@ class EveLocalScanner(QWidget):
             self.ui_frame_color,
             self.ui_text_color,
             self.ui_bg_color,
+            self.ui_font_family,
             persist=False,
         )
 
@@ -568,12 +572,16 @@ class EveLocalScanner(QWidget):
         frame_color="#161616",
         text_color="#d6d6d6",
         bg_color="#0b0b0b",
+        font_family=None,
         persist=True,
     ):
         self.ui_transparency = max(0, min(100, int(transparency)))
         self.ui_alpha = self.transparency_to_alpha(self.ui_transparency)
         self.ui_blur = 1 if int(blur) else 0
         self.ui_font_size = max(8, min(11, int(font_size)))
+        self.ui_font_family = set_app_font_family(str(font_family or getattr(self, "ui_font_family", "Anthropic Serif")).strip())
+        self.ui_font_resolved = self.ui_font_family
+        app_font_family = get_app_font_family()
         self.ui_compact_zkill = 1 if int(compact_zkill) else 0
         self.ui_frame_color = str(frame_color).lower()
         self.ui_text_color = str(text_color).lower()
@@ -585,6 +593,7 @@ class EveLocalScanner(QWidget):
                     "transparency": self.ui_transparency,
                     "blur": self.ui_blur,
                     "font_size": self.ui_font_size,
+                    "font_family": self.ui_font_family,
                     "compact_zkill": self.ui_compact_zkill,
                     "frame_color": self.ui_frame_color,
                     "text_color": self.ui_text_color,
@@ -627,7 +636,7 @@ class EveLocalScanner(QWidget):
                 border: none;
                 gridline-color: transparent;
                 color: {self.ui_text_color};
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self.ui_font_size}pt;
+                font-family: '{app_font_family}'; font-size: {self.ui_font_size}pt;
                 outline: none;
                 selection-background-color: rgba(57, 199, 181, 85);
             }}
@@ -642,7 +651,7 @@ class EveLocalScanner(QWidget):
                 border: none;
                 padding: 0px 3px;
                 color: {self.ui_text_color};
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self.ui_font_size}pt;
+                font-family: '{app_font_family}'; font-size: {self.ui_font_size}pt;
             }}
 
             QTableWidget::item:selected {{
@@ -661,7 +670,7 @@ class EveLocalScanner(QWidget):
                 border: none;
                 border-bottom: none;
                 padding: 1px 3px;
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self.ui_font_size}pt;
+                font-family: '{app_font_family}'; font-size: {self.ui_font_size}pt;
                 font-weight: normal;
             }}
 
@@ -718,7 +727,7 @@ class EveLocalScanner(QWidget):
         self.title_bar.title.setStyleSheet(f"""
             QLabel {{
                 color: {self.ui_text_color};
-                font-family: '{APP_FONT_FAMILY}'; font-size: {self.ui_font_size}pt;
+                font-family: '{app_font_family}'; font-size: {self.ui_font_size}pt;
                 font-weight: normal;
                 background-color: transparent;
             }}
@@ -730,20 +739,20 @@ class EveLocalScanner(QWidget):
 
     def apply_font_size(self, font_size):
         font = self.font()
-        font.setFamily(APP_FONT_FAMILY)
+        font.setFamily(get_app_font_family())
         font.setPointSize(int(font_size))
         self.setFont(font)
 
         app = QApplication.instance()
         if app:
             app_font = app.font()
-            app_font.setFamily(APP_FONT_FAMILY)
+            app_font.setFamily(get_app_font_family())
             app_font.setPointSize(int(font_size))
             app.setFont(app_font)
 
         for widget in self.findChildren(QWidget):
             widget_font = widget.font()
-            widget_font.setFamily(APP_FONT_FAMILY)
+            widget_font.setFamily(get_app_font_family())
             widget_font.setPointSize(int(font_size))
             widget.setFont(widget_font)
 
@@ -775,7 +784,7 @@ class EveLocalScanner(QWidget):
 
     def update_table_item_fonts(self, font_size):
         font = self.table.font()
-        font.setFamily(APP_FONT_FAMILY)
+        font.setFamily(get_app_font_family())
         font.setPointSize(int(font_size))
 
         self.table.setFont(font)
@@ -826,6 +835,7 @@ class EveLocalScanner(QWidget):
                 self.ui_frame_color,
                 self.ui_text_color,
                 self.ui_bg_color,
+                self.ui_font_family,
                 persist=False,
             )
 

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QFrame, QPushButton
 
 from user_settings import load_ui_settings
 from windows_blur import enable_eve_blur
-from app_fonts import APP_FONT_FAMILY
+from app_fonts import get_app_font_family
 from zkill_fit_export import build_eft_fit_text
 from zkill_fit_fetcher import NativeFitFetchThread
 from zkill_fit_utils import format_isk_short, safe_int, transparency_to_alpha
@@ -182,7 +182,7 @@ class FittingPanelPopup(QFrame):
             f"background-color: rgba({br}, {bg_g}, {bb}, 210);"
             f"color: rgba({tr}, {tg}, {tb}, 245);"
             f"border: 1px solid rgba({r}, {g}, {b}, 190);"
-            f"border-radius: 5px; padding: 1px 10px; font-family: '{APP_FONT_FAMILY}'; font-size: 10px; font-weight: 600;"
+            f"border-radius: 5px; padding: 1px 10px; font-family: '{get_app_font_family()}'; font-size: 10px; font-weight: 600;"
             "}"
             "QPushButton:hover {"
             f"background-color: rgba({hover_r}, {hover_g}, {hover_b}, 225);"
